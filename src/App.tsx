@@ -23,7 +23,7 @@ type Project = {
 
 type Study = {
   id: string;
-  project_id: string;
+  projectId: string;
   internal_name: string;
   paper_label: string | null;
   status: string;
@@ -33,7 +33,7 @@ type Study = {
 
 type Artifact = {
   id: string;
-  study_id: string;
+  studyId: string;
   kind: "url" | "path";
   value: string;
   label: string | null;
@@ -100,7 +100,7 @@ export default function App() {
       try {
         setLoading(true);
         const list = await invoke<Study[]>("list_studies", {
-          project_id: selectedProjectId
+          projectId: selectedProjectId
         });
         setStudies(list);
         setSelectedStudyId(list[0]?.id ?? null);
@@ -123,7 +123,7 @@ export default function App() {
       try {
         setLoading(true);
       const detail = await invoke<StudyDetail>("get_study_detail", {
-        study_id: selectedStudyId
+        studyId: selectedStudyId
       });
         setDetail(detail);
       } catch (err) {
@@ -145,7 +145,7 @@ export default function App() {
   };
 
   const refreshStudies = async (projectId: string, selectId?: string) => {
-    const list = await invoke<Study[]>("list_studies", { project_id: projectId });
+    const list = await invoke<Study[]>("list_studies", { projectId: projectId });
     setStudies(list);
     if (selectId) {
       setSelectedStudyId(selectId);
@@ -204,7 +204,7 @@ export default function App() {
       setLoading(true);
       const project = await invoke<Project>("create_project", {
         name: trimmedName,
-        root_dir: trimmedRoot,
+        rootDir: trimmedRoot,
         google_drive_url: trimmedDrive ? trimmedDrive : null
       });
       await refreshProjects(project.id);
@@ -224,7 +224,7 @@ export default function App() {
     try {
       setLoading(true);
       const study = await invoke<Study>("create_study", {
-        project_id: selectedProjectId,
+        projectId: selectedProjectId,
         internal_name: internalName,
         paper_label: paperLabel
       });
@@ -250,13 +250,13 @@ export default function App() {
     try {
       setLoading(true);
       await invoke("rename_study", {
-        study_id: detail.study.id,
+        studyId: detail.study.id,
         internal_name: internalName,
         paper_label: paperLabel?.trim() ? paperLabel.trim() : null
       });
-      await refreshStudies(detail.study.project_id, detail.study.id);
+      await refreshStudies(detail.study.projectId, detail.study.id);
       const updated = await invoke<StudyDetail>("get_study_detail", {
-        study_id: detail.study.id
+        studyId: detail.study.id
       });
       setDetail(updated);
     } catch (err) {
@@ -270,12 +270,12 @@ export default function App() {
     if (!detail) return;
     try {
       setLoading(true);
-    await invoke("update_study_status", { study_id: detail.study.id, status });
+    await invoke("update_study_status", { studyId: detail.study.id, status });
       const updated = await invoke<StudyDetail>("get_study_detail", {
-        study_id: detail.study.id
+        studyId: detail.study.id
       });
       setDetail(updated);
-      await refreshStudies(detail.study.project_id, detail.study.id);
+      await refreshStudies(detail.study.projectId, detail.study.id);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -294,13 +294,13 @@ export default function App() {
     try {
       setLoading(true);
       await invoke("add_artifact", {
-        study_id: detail.study.id,
+        studyId: detail.study.id,
         kind,
         value,
         label
       });
       const updated = await invoke<StudyDetail>("get_study_detail", {
-        study_id: detail.study.id
+        studyId: detail.study.id
       });
       setDetail(updated);
     } catch (err) {
@@ -317,7 +317,7 @@ export default function App() {
       setLoading(true);
       await invoke("remove_artifact", { artifact_id: artifactId });
       const updated = await invoke<StudyDetail>("get_study_detail", {
-        study_id: detail.study.id
+        studyId: detail.study.id
       });
       setDetail(updated);
     } catch (err) {
@@ -335,7 +335,7 @@ export default function App() {
     try {
       setLoading(true);
       const result = await invoke<string>("generate_osf_packages", {
-        study_id: detail.study.id,
+        studyId: detail.study.id,
         include_pilots: includePilots
       });
       alert(result);

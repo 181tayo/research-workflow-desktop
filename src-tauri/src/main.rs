@@ -9,7 +9,7 @@ use std::process::Command;
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
-const PROJECT_FOLDERS: &[&str] = &["studies", "project_docs", "materials", "data"];
+const PROJECT_FOLDERS: &[&str] = &["studies", "paper", "templates"];
 const STUDY_FOLDERS: &[&str] = &[
   "01_admin",
   "02_materials",
@@ -24,12 +24,21 @@ const STUDY_FOLDERS: &[&str] = &[
   "pilots"
 ];
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct Project {
   id: String,
   name: String,
   root_path: String,
-  created_at: String
+  created_at: String,
+  #[serde(default)]
+  updated_at: String,
+  #[serde(default)]
+  google_drive_url: Option<String>
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ProjectsStore {
+  projects: Vec<Project>
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,6 +79,11 @@ fn app_root(app: &AppHandle) -> Result<PathBuf, String> {
 fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
   let root = app_root(app)?;
   Ok(root.join("db.sqlite3"))
+}
+
+fn projects_path(app: &AppHandle) -> Result<PathBuf, String> {
+  let root = app_root(app)?;
+  Ok(root.join("projects.json"))
 }
 
 fn connection(app: &AppHandle) -> Result<Connection, String> {
@@ -113,6 +127,92 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
 
 fn now_string() -> String {
   Utc::now().to_rfc3339()
+}
+
+fn read_projects_store(app: &AppHandle) -> Result<ProjectsStore, String> {
+  let path = projects_path(app)?;
+  if !path.exists() {
+    return Ok(ProjectsStore { projects: Vec::new() });
+  }
+  let raw = fs::read_to_string(&path).map_err(|err| err.to_string())?;
+  if raw.trim().is_empty() {
+    return Ok(ProjectsStore { projects: Vec::new() });
+  }
+  let mut store: ProjectsStore =
+    serde_json::from_str(&raw).map_err(|err| err.to_string())?;
+  for project in &mut store.projects {
+    if project.updated_at.is_empty() {
+      project.updated_at = project.created_at.clone();
+    }
+  }
+  Ok(store)
+}
+
+fn write_projects_store(app: &AppHandle, store: &ProjectsStore) -> Result<(), String> {
+  let path = projects_path(app)?;
+  let payload = serde_json::to_string_pretty(store).map_err(|err| err.to_string())?;
+  fs::write(path, payload).map_err(|err| err.to_string())?;
+  Ok(())
+}
+
+fn migrate_sqlite_projects(app: &AppHandle) -> Result<(), String> {
+  let db = db_path(app)?;
+  if !db.exists() {
+    return Ok(());
+  }
+
+  let conn = Connection::open(db).map_err(|err| err.to_string())?;
+  let table_exists: i64 = conn
+    .query_row(
+      "SELECT COUNT(1) FROM sqlite_master WHERE type='table' AND name='projects'",
+      [],
+      |row| row.get(0)
+    )
+    .map_err(|err| err.to_string())?;
+  if table_exists == 0 {
+    return Ok(());
+  }
+
+  let mut stmt = conn
+    .prepare("SELECT id, name, root_path, created_at FROM projects")
+    .map_err(|err| err.to_string())?;
+  let rows = stmt
+    .query_map([], |row| {
+      Ok(Project {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        root_path: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(3)?,
+        google_drive_url: None
+      })
+    })
+    .map_err(|err| err.to_string())?;
+
+  let mut sqlite_projects = Vec::new();
+  for row in rows {
+    sqlite_projects.push(row.map_err(|err| err.to_string())?);
+  }
+  if sqlite_projects.is_empty() {
+    return Ok(());
+  }
+
+  let mut store = read_projects_store(app)?;
+  let mut added = 0;
+  for project in sqlite_projects {
+    if !store.projects.iter().any(|p| p.id == project.id) {
+      store.projects.push(project);
+      added += 1;
+    }
+  }
+  if added > 0 {
+    write_projects_store(app, &store)?;
+    println!("migration: imported {} project(s) from sqlite", added);
+  } else {
+    println!("migration: no new projects to import from sqlite");
+  }
+
+  Ok(())
 }
 
 fn ensure_folders(root: &Path, folders: &[&str]) -> Result<(), String> {
@@ -188,51 +288,57 @@ fn init_db(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn list_projects(app: AppHandle) -> Result<Vec<Project>, String> {
-  let conn = connection(&app)?;
-  init_schema(&conn)?;
-  let mut stmt = conn
-    .prepare("SELECT id, name, root_path, created_at FROM projects ORDER BY created_at DESC")
-    .map_err(|err| err.to_string())?;
-  let rows = stmt
-    .query_map([], |row| {
-      Ok(Project {
-        id: row.get(0)?,
-        name: row.get(1)?,
-        root_path: row.get(2)?,
-        created_at: row.get(3)?
-      })
-    })
-    .map_err(|err| err.to_string())?;
-
-  let mut projects = Vec::new();
-  for row in rows {
-    projects.push(row.map_err(|err| err.to_string())?);
-  }
-  Ok(projects)
+  migrate_sqlite_projects(&app)?;
+  let mut store = read_projects_store(&app)?;
+  store
+    .projects
+    .sort_by(|a, b| b.created_at.cmp(&a.created_at));
+  Ok(store.projects)
 }
 
 #[tauri::command]
-fn create_project(app: AppHandle, name: String) -> Result<Project, String> {
-  let conn = connection(&app)?;
-  init_schema(&conn)?;
-
+fn create_project(
+  app: AppHandle,
+  name: String,
+  root_dir: String,
+  google_drive_url: Option<String>
+) -> Result<Project, String> {
   let id = Uuid::new_v4().to_string();
-  let root = app_root(&app)?.join("projects").join(&id);
+  let trimmed_name = name.trim();
+  if trimmed_name.is_empty() {
+    return Err("Project name is required.".to_string());
+  }
+  let root_dir_path = PathBuf::from(root_dir.trim());
+  if !root_dir_path.exists() || !root_dir_path.is_dir() {
+    return Err("Project root location must be an existing folder.".to_string());
+  }
+
+  let root = root_dir_path.join(trimmed_name);
+  if root.exists() {
+    return Err("Project folder already exists.".to_string());
+  }
   ensure_folders(&root, PROJECT_FOLDERS)?;
 
   let project = Project {
     id: id.clone(),
-    name,
+    name: trimmed_name.to_string(),
     root_path: root.to_string_lossy().to_string(),
-    created_at: now_string()
+    created_at: now_string(),
+    updated_at: now_string(),
+    google_drive_url: google_drive_url
+      .and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+          None
+        } else {
+          Some(trimmed)
+        }
+      })
   };
 
-  conn
-    .execute(
-      "INSERT INTO projects (id, name, root_path, created_at) VALUES (?1, ?2, ?3, ?4)",
-      params![project.id, project.name, project.root_path, project.created_at]
-    )
-    .map_err(|err| err.to_string())?;
+  let mut store = read_projects_store(&app)?;
+  store.projects.push(project.clone());
+  write_projects_store(&app, &store)?;
 
   Ok(project)
 }
@@ -278,13 +384,13 @@ fn create_study(
   let conn = connection(&app)?;
   init_schema(&conn)?;
 
-  let project_root: String = conn
-    .query_row(
-      "SELECT root_path FROM projects WHERE id = ?1",
-      params![project_id],
-      |row| row.get(0)
-    )
-    .map_err(|err| err.to_string())?;
+  let store = read_projects_store(&app)?;
+  let project_root = store
+    .projects
+    .iter()
+    .find(|project| project.id == project_id)
+    .map(|project| project.root_path.clone())
+    .ok_or_else(|| "Project not found.".to_string())?;
 
   let id = Uuid::new_v4().to_string();
   let folder = PathBuf::from(project_root).join("studies").join(&id);

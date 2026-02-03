@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/tauri";
+import { open } from "@tauri-apps/api/dialog";
 
 const STATUSES = [
   "planning",
@@ -16,6 +17,8 @@ type Project = {
   name: string;
   root_path: string;
   created_at: string;
+  updated_at?: string;
+  google_drive_url?: string | null;
 };
 
 type Study = {
@@ -50,6 +53,14 @@ export default function App() {
   const [detail, setDetail] = useState<StudyDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
+  const [projectName, setProjectName] = useState("");
+  const [projectRoot, setProjectRoot] = useState("");
+  const [googleDriveUrl, setGoogleDriveUrl] = useState("");
+  const [projectFormErrors, setProjectFormErrors] = useState<{
+    name?: string;
+    root?: string;
+  }>({});
 
   const selectedProject = useMemo(
     () => projects.find((p) => p.id === selectedProjectId) ?? null,
@@ -141,13 +152,63 @@ export default function App() {
     }
   };
 
+  const resetProjectModal = () => {
+    setProjectName("");
+    setProjectRoot("");
+    setGoogleDriveUrl("");
+    setProjectFormErrors({});
+  };
+
+  const openProjectModal = () => {
+    resetProjectModal();
+    setIsProjectModalOpen(true);
+  };
+
+  const closeProjectModal = () => {
+    setIsProjectModalOpen(false);
+  };
+
+  const handlePickProjectRoot = async () => {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Select project root location"
+      });
+      if (typeof selected === "string") {
+        setProjectRoot(selected);
+        setProjectFormErrors((prev) => ({ ...prev, root: undefined }));
+      }
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
   const handleCreateProject = async () => {
-    const name = window.prompt("Project name?");
-    if (!name) return;
+    const trimmedName = projectName.trim();
+    const trimmedRoot = projectRoot.trim();
+    const trimmedDrive = googleDriveUrl.trim();
+    const nextErrors: { name?: string; root?: string } = {};
+
+    if (!trimmedName) {
+      nextErrors.name = "Project name is required.";
+    }
+    if (!trimmedRoot) {
+      nextErrors.root = "Project root location is required.";
+    }
+
+    setProjectFormErrors(nextErrors);
+    if (Object.keys(nextErrors).length > 0) return;
+
     try {
       setLoading(true);
-      const project = await invoke<Project>("create_project", { name });
+      const project = await invoke<Project>("create_project", {
+        name: trimmedName,
+        root_dir: trimmedRoot,
+        google_drive_url: trimmedDrive ? trimmedDrive : null
+      });
       await refreshProjects(project.id);
+      closeProjectModal();
     } catch (err) {
       setError(String(err));
     } finally {
@@ -335,7 +396,7 @@ export default function App() {
         <section className="panel">
           <div className="panel-header">
             <h2>Projects</h2>
-            <button onClick={handleCreateProject}>Create Project</button>
+            <button onClick={openProjectModal}>New Project</button>
           </div>
           <div className="panel-body">
             {projects.length === 0 && <p className="muted">No projects yet.</p>}
@@ -450,6 +511,63 @@ export default function App() {
       </div>
 
       {loading && <div className="loading">Working...</div>}
+
+      {isProjectModalOpen && (
+        <div className="modal-backdrop" onClick={closeProjectModal}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h2>New Project</h2>
+              <button className="ghost" onClick={closeProjectModal}>
+                Close
+              </button>
+            </div>
+            <div className="modal-body">
+              <label htmlFor="project-name">Project Name *</label>
+              <input
+                id="project-name"
+                value={projectName}
+                onChange={(event) => {
+                  setProjectName(event.target.value);
+                  if (projectFormErrors.name) {
+                    setProjectFormErrors((prev) => ({ ...prev, name: undefined }));
+                  }
+                }}
+                placeholder="e.g., Distraction & Memory"
+              />
+              {projectFormErrors.name && (
+                <p className="field-error">{projectFormErrors.name}</p>
+              )}
+
+              <label>Project Root Location *</label>
+              <div className="inline-field">
+                <input
+                  value={projectRoot}
+                  placeholder="Choose a folder"
+                  readOnly
+                />
+                <button onClick={handlePickProjectRoot}>Choose</button>
+              </div>
+              {projectFormErrors.root && (
+                <p className="field-error">{projectFormErrors.root}</p>
+              )}
+
+              <label htmlFor="drive-url">Google Drive Folder URL (optional)</label>
+              <input
+                id="drive-url"
+                value={googleDriveUrl}
+                onChange={(event) => setGoogleDriveUrl(event.target.value)}
+                placeholder="https://drive.google.com/..."
+              />
+            </div>
+            <div className="modal-actions">
+              <button className="ghost" onClick={closeProjectModal}>
+                Cancel
+              </button>
+              <button onClick={handleCreateProject}>Create Project</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

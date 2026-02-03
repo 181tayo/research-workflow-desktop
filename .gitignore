@@ -1,0 +1,28 @@
+# Node / build
+node_modules/
+dist/
+
+# Tauri / Rust
+src-tauri/target/
+target/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local data
+*.db
+*.sqlite
+*.sqlite3
+app_data/
+
+# Raw data / pilots
+**/raw_data/
+**/raw/
+**/pilots/
+**/pilot/
+**/*pilot*
+
+# OSF release artifacts
+**/08_osf_release/

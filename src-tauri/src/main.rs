@@ -11,60 +11,88 @@ use uuid::Uuid;
 
 const PROJECT_FOLDERS: &[&str] = &["studies", "paper", "templates"];
 const STUDY_FOLDERS: &[&str] = &[
-  "01_admin",
-  "02_materials",
-  "03_data",
-  "03_data/raw",
-  "03_data/processed",
-  "04_analysis",
-  "05_results",
-  "06_manuscript",
-  "07_assets",
-  "08_osf_release",
-  "pilots"
+  "00_admin",
+  "01_design",
+  "02_build",
+  "03_pilots",
+  "04_prereg",
+  "05_data",
+  "06_analysis",
+  "07_reports",
+  "08_osf_release"
 ];
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct Project {
   id: String,
   name: String,
+  #[serde(alias = "root_path")]
   root_path: String,
+  #[serde(alias = "created_at")]
   created_at: String,
   #[serde(default)]
+  #[serde(alias = "updated_at")]
   updated_at: String,
   #[serde(default)]
-  google_drive_url: Option<String>
+  #[serde(alias = "google_drive_url")]
+  google_drive_url: Option<String>,
+  #[serde(default)]
+  studies: Vec<Study>
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct ProjectsStore {
   projects: Vec<Project>
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct Study {
   id: String,
+  title: String,
+  #[serde(alias = "created_at")]
+  created_at: String,
+  #[serde(default)]
+  #[serde(alias = "folder_path")]
+  folder_path: String
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct DbStudy {
+  id: String,
+  #[serde(alias = "project_id")]
   project_id: String,
+  #[serde(alias = "internal_name")]
   internal_name: String,
+  #[serde(alias = "paper_label")]
   paper_label: Option<String>,
   status: String,
+  #[serde(alias = "folder_path")]
   folder_path: String,
+  #[serde(alias = "created_at")]
   created_at: String
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct Artifact {
   id: String,
+  #[serde(alias = "study_id")]
   study_id: String,
   kind: String,
   value: String,
   label: Option<String>,
+  #[serde(alias = "created_at")]
   created_at: String
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct StudyDetail {
-  study: Study,
+  study: DbStudy,
   artifacts: Vec<Artifact>
 }
 
@@ -129,6 +157,23 @@ fn now_string() -> String {
   Utc::now().to_rfc3339()
 }
 
+fn is_valid_study_folder(value: &str) -> bool {
+  let mut chars = value.chars();
+  if chars.next() != Some('S') || chars.next() != Some('-') {
+    return false;
+  }
+  let rest: Vec<char> = chars.collect();
+  if rest.len() != 6 {
+    return false;
+  }
+  rest.iter().all(|ch| ch.is_ascii_alphanumeric())
+}
+
+fn generate_study_code() -> String {
+  let raw = Uuid::new_v4().simple().to_string().to_uppercase();
+  format!("S-{}", &raw[..6])
+}
+
 fn read_projects_store(app: &AppHandle) -> Result<ProjectsStore, String> {
   let path = projects_path(app)?;
   if !path.exists() {
@@ -184,7 +229,8 @@ fn migrate_sqlite_projects(app: &AppHandle) -> Result<(), String> {
         root_path: row.get(2)?,
         created_at: row.get(3)?,
         updated_at: row.get(3)?,
-        google_drive_url: None
+        google_drive_url: None,
+        studies: Vec::new()
       })
     })
     .map_err(|err| err.to_string())?;
@@ -296,19 +342,22 @@ fn list_projects(app: AppHandle) -> Result<Vec<Project>, String> {
   Ok(store.projects)
 }
 
-#[tauri::command]
-fn create_project(
-  app: AppHandle,
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateProjectArgs {
   name: String,
   root_dir: String,
   google_drive_url: Option<String>
-) -> Result<Project, String> {
+}
+
+#[tauri::command]
+fn create_project(app: AppHandle, args: CreateProjectArgs) -> Result<Project, String> {
   let id = Uuid::new_v4().to_string();
-  let trimmed_name = name.trim();
+  let trimmed_name = args.name.trim();
   if trimmed_name.is_empty() {
     return Err("Project name is required.".to_string());
   }
-  let root_dir_path = PathBuf::from(root_dir.trim());
+  let root_dir_path = PathBuf::from(args.root_dir.trim());
   if !root_dir_path.exists() || !root_dir_path.is_dir() {
     return Err("Project root location must be an existing folder.".to_string());
   }
@@ -325,7 +374,7 @@ fn create_project(
     root_path: root.to_string_lossy().to_string(),
     created_at: now_string(),
     updated_at: now_string(),
-    google_drive_url: google_drive_url
+    google_drive_url: args.google_drive_url
       .and_then(|value| {
         let trimmed = value.trim().to_string();
         if trimmed.is_empty() {
@@ -333,7 +382,8 @@ fn create_project(
         } else {
           Some(trimmed)
         }
-      })
+      }),
+    studies: Vec::new()
   };
 
   let mut store = read_projects_store(&app)?;
@@ -343,8 +393,276 @@ fn create_project(
   Ok(project)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddStudyArgs {
+  project_id: String,
+  folder_name: Option<String>,
+  title: Option<String>
+}
+
 #[tauri::command]
-fn list_studies(app: AppHandle, project_id: String) -> Result<Vec<Study>, String> {
+fn add_study(app: AppHandle, args: AddStudyArgs) -> Result<Project, String> {
+  println!(
+    "add_study called with project_id={}, folder_name={:?}, title={:?}",
+    args.project_id, args.folder_name, args.title
+  );
+  let mut store = read_projects_store(&app)?;
+  let project = store
+    .projects
+    .iter_mut()
+    .find(|project| project.id == args.project_id)
+    .ok_or_else(|| "Project not found.".to_string())?;
+  println!(
+    "add_study resolved project root_path={} existing studies={}",
+    project.root_path,
+    project.studies.len()
+  );
+
+  let mut trimmed_folder = args.folder_name.unwrap_or_default().trim().to_uppercase();
+  if trimmed_folder.is_empty() {
+    for _ in 0..20 {
+      let candidate = generate_study_code();
+      let candidate_root = PathBuf::from(project.root_path.clone())
+        .join("studies")
+        .join(&candidate);
+      if !candidate_root.exists()
+        && !project.studies.iter().any(|study| study.id == candidate)
+      {
+        trimmed_folder = candidate;
+        break;
+      }
+    }
+    if trimmed_folder.is_empty() {
+      return Err("Unable to generate a unique study code.".to_string());
+    }
+  }
+  if !is_valid_study_folder(&trimmed_folder) {
+    return Err("Study folder name must match S-XXXXXX (letters/numbers).".to_string());
+  }
+  if trimmed_folder.contains('/') || trimmed_folder.contains('\\') || trimmed_folder.contains("..") {
+    return Err("Study folder name must be a single folder name.".to_string());
+  }
+  if project.studies.iter().any(|study| study.id == trimmed_folder) {
+    return Err("Study code already exists.".to_string());
+  }
+
+  let trimmed_title = args.title.unwrap_or_else(|| "Untitled Study".to_string());
+  let study_root = PathBuf::from(project.root_path.clone())
+    .join("studies")
+    .join(&trimmed_folder);
+  if study_root.exists() {
+    return Err("Study folder already exists.".to_string());
+  }
+  ensure_folders(&study_root, STUDY_FOLDERS)?;
+
+  let new_study = Study {
+    id: trimmed_folder.to_string(),
+    title: if trimmed_title.trim().is_empty() {
+      "Untitled Study".to_string()
+    } else {
+      trimmed_title
+    },
+    created_at: now_string(),
+    folder_path: study_root.to_string_lossy().to_string()
+  };
+
+  project.studies.push(new_study);
+  project.updated_at = now_string();
+  let updated = project.clone();
+  write_projects_store(&app, &store)?;
+  Ok(updated)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RenameStudyJsonArgs {
+  project_id: String,
+  study_id: String,
+  title: String
+}
+
+#[tauri::command]
+fn rename_study_json(app: AppHandle, args: RenameStudyJsonArgs) -> Result<Project, String> {
+  let mut store = read_projects_store(&app)?;
+  let project = store
+    .projects
+    .iter_mut()
+    .find(|project| project.id == args.project_id)
+    .ok_or_else(|| "Project not found.".to_string())?;
+
+  let study = project
+    .studies
+    .iter_mut()
+    .find(|study| study.id == args.study_id)
+    .ok_or_else(|| "Study not found.".to_string())?;
+
+  let trimmed = args.title.trim();
+  if trimmed.is_empty() {
+    return Err("Study title is required.".to_string());
+  }
+
+  study.title = trimmed.to_string();
+  project.updated_at = now_string();
+  let updated = project.clone();
+  write_projects_store(&app, &store)?;
+  Ok(updated)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RenameStudyFolderArgs {
+  project_id: String,
+  study_id: String,
+  folder_name: String
+}
+
+#[tauri::command]
+fn rename_study_folder_json(app: AppHandle, args: RenameStudyFolderArgs) -> Result<Project, String> {
+  let mut store = read_projects_store(&app)?;
+  let project = store
+    .projects
+    .iter_mut()
+    .find(|project| project.id == args.project_id)
+    .ok_or_else(|| "Project not found.".to_string())?;
+
+  let trimmed_folder = args.folder_name.trim();
+  if trimmed_folder.is_empty() {
+    return Err("Study folder name is required.".to_string());
+  }
+  if !is_valid_study_folder(trimmed_folder) {
+    return Err("Study folder name must match S-XXXXXX (letters/numbers).".to_string());
+  }
+  if trimmed_folder.contains('/') || trimmed_folder.contains('\\') || trimmed_folder.contains("..") {
+    return Err("Study folder name must be a single folder name.".to_string());
+  }
+  if project
+    .studies
+    .iter()
+    .any(|study| study.id == trimmed_folder && study.id != args.study_id)
+  {
+    return Err("Study code already exists.".to_string());
+  }
+
+  let study = project
+    .studies
+    .iter_mut()
+    .find(|study| study.id == args.study_id)
+    .ok_or_else(|| "Study not found.".to_string())?;
+
+  let base = PathBuf::from(project.root_path.clone()).join("studies");
+  let old_root = if study.folder_path.trim().is_empty() {
+    base.join(&study.id)
+  } else {
+    PathBuf::from(study.folder_path.clone())
+  };
+  let new_root = base.join(trimmed_folder);
+
+  if old_root != new_root {
+    if new_root.exists() {
+      return Err("Study folder already exists.".to_string());
+    }
+    if !old_root.exists() {
+      return Err("Study folder does not exist.".to_string());
+    }
+    fs::rename(&old_root, &new_root).map_err(|err| err.to_string())?;
+  }
+
+  study.id = trimmed_folder.to_string();
+  study.folder_path = new_root.to_string_lossy().to_string();
+  project.updated_at = now_string();
+
+  let updated = project.clone();
+  write_projects_store(&app, &store)?;
+  Ok(updated)
+}
+
+#[tauri::command]
+fn migrate_json_to_sqlite(app: AppHandle) -> Result<String, String> {
+  let conn = connection(&app)?;
+  init_schema(&conn)?;
+  let store = read_projects_store(&app)?;
+
+  let mut projects_added = 0;
+  let mut studies_added = 0;
+
+  for project in store.projects {
+    let project_id = project.id.clone();
+    let project_name = project.name.clone();
+    let project_root = project.root_path.clone();
+    let project_created = project.created_at.clone();
+    let exists: i64 = conn
+      .query_row(
+        "SELECT COUNT(1) FROM projects WHERE id = ?1",
+        params![&project_id],
+        |row| row.get(0)
+      )
+      .map_err(|err| err.to_string())?;
+
+    if exists == 0 {
+      conn
+        .execute(
+          "INSERT INTO projects (id, name, root_path, created_at) VALUES (?1, ?2, ?3, ?4)",
+          params![&project_id, &project_name, &project_root, &project_created]
+        )
+        .map_err(|err| err.to_string())?;
+      projects_added += 1;
+    }
+
+    for study in project.studies {
+      let study_exists: i64 = conn
+        .query_row(
+          "SELECT COUNT(1) FROM studies WHERE id = ?1",
+          params![study.id],
+          |row| row.get(0)
+        )
+        .map_err(|err| err.to_string())?;
+      if study_exists > 0 {
+        continue;
+      }
+
+      let folder_path = if !study.folder_path.trim().is_empty() {
+        study.folder_path
+      } else {
+        PathBuf::from(project_root.clone())
+          .join("studies")
+          .join(&study.id)
+          .to_string_lossy()
+          .to_string()
+      };
+
+      conn
+        .execute(
+          "INSERT INTO studies (id, project_id, internal_name, paper_label, status, folder_path, created_at) \
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+          params![
+            study.id,
+            &project_id,
+            study.title,
+            Option::<String>::None,
+            "planning",
+            folder_path,
+            study.created_at
+          ]
+        )
+        .map_err(|err| err.to_string())?;
+      studies_added += 1;
+    }
+  }
+
+  Ok(format!(
+    "Migration complete. Projects added: {projects_added}. Studies added: {studies_added}."
+  ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListStudiesArgs {
+  project_id: String
+}
+
+#[tauri::command]
+fn list_studies(app: AppHandle, args: ListStudiesArgs) -> Result<Vec<DbStudy>, String> {
   let conn = connection(&app)?;
   init_schema(&conn)?;
   let mut stmt = conn
@@ -354,8 +672,8 @@ fn list_studies(app: AppHandle, project_id: String) -> Result<Vec<Study>, String
     )
     .map_err(|err| err.to_string())?;
   let rows = stmt
-    .query_map(params![project_id], |row| {
-      Ok(Study {
+    .query_map(params![args.project_id], |row| {
+      Ok(DbStudy {
         id: row.get(0)?,
         project_id: row.get(1)?,
         internal_name: row.get(2)?,
@@ -367,20 +685,23 @@ fn list_studies(app: AppHandle, project_id: String) -> Result<Vec<Study>, String
     })
     .map_err(|err| err.to_string())?;
 
-  let mut studies = Vec::new();
+  let mut studies: Vec<DbStudy> = Vec::new();
   for row in rows {
     studies.push(row.map_err(|err| err.to_string())?);
   }
   Ok(studies)
 }
 
-#[tauri::command]
-fn create_study(
-  app: AppHandle,
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateStudyArgs {
   project_id: String,
   internal_name: String,
   paper_label: Option<String>
-) -> Result<Study, String> {
+}
+
+#[tauri::command]
+fn create_study(app: AppHandle, args: CreateStudyArgs) -> Result<DbStudy, String> {
   let conn = connection(&app)?;
   init_schema(&conn)?;
 
@@ -388,7 +709,7 @@ fn create_study(
   let project_root = store
     .projects
     .iter()
-    .find(|project| project.id == project_id)
+    .find(|project| project.id == args.project_id)
     .map(|project| project.root_path.clone())
     .ok_or_else(|| "Project not found.".to_string())?;
 
@@ -396,11 +717,11 @@ fn create_study(
   let folder = PathBuf::from(project_root).join("studies").join(&id);
   ensure_folders(&folder, STUDY_FOLDERS)?;
 
-  let study = Study {
+  let study = DbStudy {
     id: id.clone(),
-    project_id,
-    internal_name,
-    paper_label,
+    project_id: args.project_id,
+    internal_name: args.internal_name,
+    paper_label: args.paper_label,
     status: "planning".to_string(),
     folder_path: folder.to_string_lossy().to_string(),
     created_at: now_string()
@@ -425,53 +746,65 @@ fn create_study(
   Ok(study)
 }
 
-#[tauri::command]
-fn rename_study(
-  app: AppHandle,
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RenameStudyArgs {
   study_id: String,
   internal_name: String,
   paper_label: Option<String>
-) -> Result<(), String> {
+}
+
+#[tauri::command]
+fn rename_study(app: AppHandle, args: RenameStudyArgs) -> Result<(), String> {
   let conn = connection(&app)?;
   init_schema(&conn)?;
   conn
     .execute(
       "UPDATE studies SET internal_name = ?1, paper_label = ?2 WHERE id = ?3",
-      params![internal_name, paper_label, study_id]
+      params![args.internal_name, args.paper_label, args.study_id]
     )
     .map_err(|err| err.to_string())?;
   Ok(())
 }
 
-#[tauri::command]
-fn update_study_status(
-  app: AppHandle,
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateStudyStatusArgs {
   study_id: String,
   status: String
-) -> Result<(), String> {
+}
+
+#[tauri::command]
+fn update_study_status(app: AppHandle, args: UpdateStudyStatusArgs) -> Result<(), String> {
   let conn = connection(&app)?;
   init_schema(&conn)?;
   conn
     .execute(
       "UPDATE studies SET status = ?1 WHERE id = ?2",
-      params![status, study_id]
+      params![args.status, args.study_id]
     )
     .map_err(|err| err.to_string())?;
   Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GetStudyDetailArgs {
+  study_id: String
+}
+
 #[tauri::command]
-fn get_study_detail(app: AppHandle, study_id: String) -> Result<StudyDetail, String> {
+fn get_study_detail(app: AppHandle, args: GetStudyDetailArgs) -> Result<StudyDetail, String> {
   let conn = connection(&app)?;
   init_schema(&conn)?;
 
-  let study: Study = conn
+  let study: DbStudy = conn
     .query_row(
       "SELECT id, project_id, internal_name, paper_label, status, folder_path, created_at \
       FROM studies WHERE id = ?1",
-      params![study_id],
+      params![args.study_id],
       |row| {
-        Ok(Study {
+        Ok(DbStudy {
           id: row.get(0)?,
           project_id: row.get(1)?,
           internal_name: row.get(2)?,
@@ -492,7 +825,7 @@ fn get_study_detail(app: AppHandle, study_id: String) -> Result<StudyDetail, Str
     .map_err(|err| err.to_string())?;
 
   let rows = stmt
-    .query_map(params![study_id], |row| {
+    .query_map(params![args.study_id], |row| {
       Ok(Artifact {
         id: row.get(0)?,
         study_id: row.get(1)?,
@@ -512,49 +845,61 @@ fn get_study_detail(app: AppHandle, study_id: String) -> Result<StudyDetail, Str
   Ok(StudyDetail { study, artifacts })
 }
 
-#[tauri::command]
-fn add_artifact(
-  app: AppHandle,
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddArtifactArgs {
   study_id: String,
   kind: String,
   value: String,
   label: Option<String>
-) -> Result<(), String> {
+}
+
+#[tauri::command]
+fn add_artifact(app: AppHandle, args: AddArtifactArgs) -> Result<(), String> {
   let conn = connection(&app)?;
   init_schema(&conn)?;
   let id = Uuid::new_v4().to_string();
   conn
     .execute(
       "INSERT INTO artifacts (id, study_id, kind, value, label, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-      params![id, study_id, kind, value, label, now_string()]
+      params![id, args.study_id, args.kind, args.value, args.label, now_string()]
     )
     .map_err(|err| err.to_string())?;
   Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoveArtifactArgs {
+  artifact_id: String
+}
+
 #[tauri::command]
-fn remove_artifact(app: AppHandle, artifact_id: String) -> Result<(), String> {
+fn remove_artifact(app: AppHandle, args: RemoveArtifactArgs) -> Result<(), String> {
   let conn = connection(&app)?;
   init_schema(&conn)?;
   conn
-    .execute("DELETE FROM artifacts WHERE id = ?1", params![artifact_id])
+    .execute("DELETE FROM artifacts WHERE id = ?1", params![args.artifact_id])
     .map_err(|err| err.to_string())?;
   Ok(())
 }
 
-#[tauri::command]
-fn generate_osf_packages(
-  app: AppHandle,
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerateOsfPackagesArgs {
   study_id: String,
   include_pilots: bool
-) -> Result<String, String> {
+}
+
+#[tauri::command]
+fn generate_osf_packages(app: AppHandle, args: GenerateOsfPackagesArgs) -> Result<String, String> {
   let conn = connection(&app)?;
   init_schema(&conn)?;
 
   let folder_path: String = conn
     .query_row(
       "SELECT folder_path FROM studies WHERE id = ?1",
-      params![study_id],
+      params![args.study_id],
       |row| row.get(0)
     )
     .map_err(|err| err.to_string())?;
@@ -575,8 +920,8 @@ fn generate_osf_packages(
     fs::remove_dir_all(&condensed_root).map_err(|err| err.to_string())?;
   }
 
-  let complete_count = copy_dir_filtered(&study_root, &complete_root, include_pilots, false)?;
-  let condensed_count = copy_dir_filtered(&study_root, &condensed_root, include_pilots, true)?;
+  let complete_count = copy_dir_filtered(&study_root, &complete_root, args.include_pilots, false)?;
+  let condensed_count = copy_dir_filtered(&study_root, &condensed_root, args.include_pilots, true)?;
 
   Ok(format!(
     "OSF packages generated. COMPLETE: {complete_count} files, CONDENSED: {condensed_count} files."
@@ -645,6 +990,10 @@ fn main() {
       init_db,
       list_projects,
       create_project,
+      add_study,
+      rename_study_json,
+      rename_study_folder_json,
+      migrate_json_to_sqlite,
       list_studies,
       create_study,
       rename_study,

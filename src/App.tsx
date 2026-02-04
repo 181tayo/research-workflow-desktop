@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/tauri";
+import { convertFileSrc, invoke } from "@tauri-apps/api/tauri";
 import { open } from "@tauri-apps/api/dialog";
 
 const STATUSES = [
@@ -24,11 +24,18 @@ type Project = {
   studies: JsonStudy[];
 };
 
+type FileRef = {
+  path: string;
+  name: string;
+  kind: string;
+};
+
 type JsonStudy = {
   id: string;
   createdAt: string;
   title: string;
   folderPath?: string;
+  files?: FileRef[];
 };
 
 type LegacyStudy = {
@@ -55,6 +62,11 @@ type StudyDetail = {
   artifacts: Artifact[];
 };
 
+type RootDirInfo = {
+  exists: boolean;
+  isGitRepo: boolean;
+};
+
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -72,6 +84,26 @@ export default function App() {
   const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
   const [projectName, setProjectName] = useState("");
   const [projectRoot, setProjectRoot] = useState("");
+  const [projectRootMode, setProjectRootMode] = useState<"new" | "existing">("new");
+  const [projectRootInfo, setProjectRootInfo] = useState<RootDirInfo | null>(
+    null
+  );
+  const [selectedRootInfo, setSelectedRootInfo] = useState<RootDirInfo | null>(
+    null
+  );
+  const [isProjectSettingsOpen, setIsProjectSettingsOpen] = useState(false);
+  const [projectRootEdit, setProjectRootEdit] = useState("");
+  const [projectRootEditInfo, setProjectRootEditInfo] = useState<RootDirInfo | null>(
+    null
+  );
+  const [projectRootEditError, setProjectRootEditError] = useState<string | null>(
+    null
+  );
+  const [deleteProjectOnDisk, setDeleteProjectOnDisk] = useState(false);
+  const [deleteStudyOnDisk, setDeleteStudyOnDisk] = useState(false);
+  const [studyTab, setStudyTab] = useState<"overview" | "files" | "danger">(
+    "overview"
+  );
   const [googleDriveUrl, setGoogleDriveUrl] = useState("");
   const [projectFormErrors, setProjectFormErrors] = useState<{
     name?: string;
@@ -97,10 +129,12 @@ export default function App() {
     if (!selectedStudy) {
       setIsEditingStudyTitle(false);
       setStudyTitleDraft("");
+      setStudyTab("overview");
       return;
     }
     setIsEditingStudyTitle(false);
     setStudyTitleDraft(selectedStudy.title);
+    setStudyTab("overview");
   }, [selectedStudy]);
 
   const selectedLegacyStudy = useMemo(
@@ -197,6 +231,8 @@ export default function App() {
   const resetProjectModal = () => {
     setProjectName("");
     setProjectRoot("");
+    setProjectRootMode("new");
+    setProjectRootInfo(null);
     setGoogleDriveUrl("");
     setProjectFormErrors({});
   };
@@ -210,19 +246,67 @@ export default function App() {
     setIsProjectModalOpen(false);
   };
 
+  const openProjectSettings = () => {
+    if (!selectedProject) return;
+    setProjectRootEdit(selectedProject.rootPath);
+    setProjectRootEditError(null);
+    setProjectRootEditInfo(null);
+    setDeleteProjectOnDisk(false);
+    setIsProjectSettingsOpen(true);
+  };
+
+  const closeProjectSettings = () => {
+    setIsProjectSettingsOpen(false);
+  };
+
   const handlePickProjectRoot = async () => {
     try {
       const selected = await open({
         directory: true,
         multiple: false,
-        title: "Select project root location"
+        title:
+          projectRootMode === "existing"
+            ? "Select existing project folder"
+            : "Select parent folder for new project"
       });
       if (typeof selected === "string") {
         setProjectRoot(selected);
         setProjectFormErrors((prev) => ({ ...prev, root: undefined }));
+        try {
+          const info = await invoke<RootDirInfo>("check_root_dir", {
+            rootDir: selected
+          });
+          setProjectRootInfo(info);
+        } catch (err) {
+          setError(String(err));
+        }
       }
     } catch (err) {
       setError(String(err));
+    }
+  };
+
+  const handlePickProjectRootEdit = async () => {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Select project root folder"
+      });
+      if (typeof selected === "string") {
+        setProjectRootEdit(selected);
+        setProjectRootEditError(null);
+        try {
+          const info = await invoke<RootDirInfo>("check_root_dir", {
+            rootDir: selected
+          });
+          setProjectRootEditInfo(info);
+        } catch (err) {
+          setProjectRootEditError(String(err));
+        }
+      }
+    } catch (err) {
+      setProjectRootEditError(String(err));
     }
   };
 
@@ -248,6 +332,7 @@ export default function App() {
         args: {
           name: trimmedName,
           rootDir: trimmedRoot,
+          useExistingRoot: projectRootMode === "existing",
           googleDriveUrl: trimmedDrive ? trimmedDrive : null
         }
       });
@@ -255,6 +340,58 @@ export default function App() {
       closeProjectModal();
     } catch (err) {
       setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUpdateProjectRoot = async () => {
+    if (!selectedProject) return;
+    const trimmedRoot = projectRootEdit.trim();
+    if (!trimmedRoot) {
+      setProjectRootEditError("Project root location is required.");
+      return;
+    }
+    try {
+      setLoading(true);
+      const project = await invoke<Project>("update_project_root", {
+        args: {
+          projectId: selectedProject.id,
+          rootDir: trimmedRoot
+        }
+      });
+      setProjects((prev) =>
+        prev.map((item) => (item.id === project.id ? project : item))
+      );
+      setSelectedProjectId(project.id);
+      setIsProjectSettingsOpen(false);
+    } catch (err) {
+      setProjectRootEditError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteProject = async () => {
+    if (!selectedProject) return;
+    const confirmMessage = deleteProjectOnDisk
+      ? `Delete project "${selectedProject.name}" and permanently remove its folder on disk?\n\nFolder:\n${selectedProject.rootPath}`
+      : `Delete project "${selectedProject.name}" from the app?\nThis does not delete files on disk.`;
+    if (!window.confirm(confirmMessage)) return;
+    try {
+      setLoading(true);
+      await invoke("delete_project", {
+        args: {
+          projectId: selectedProject.id,
+          deleteOnDisk: deleteProjectOnDisk
+        }
+      });
+      await refreshProjects();
+      setSelectedProjectId(null);
+      setSelectedStudyId(null);
+      setIsProjectSettingsOpen(false);
+    } catch (err) {
+      setProjectRootEditError(String(err));
     } finally {
       setLoading(false);
     }
@@ -290,6 +427,42 @@ export default function App() {
       setSelectedStudyId(lastStudy?.id ?? null);
     } catch (err) {
       setAddStudyDebug(`add_study error: ${String(err)}`);
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteStudy = async () => {
+    if (!selectedProject || !selectedStudy) return;
+    const confirmation = window.prompt(
+      `Type the study ID to confirm deletion: ${selectedStudy.id}`,
+      ""
+    );
+    if (confirmation === null) return;
+    if (confirmation.trim() !== selectedStudy.id) {
+      setError("Study ID did not match. Deletion cancelled.");
+      return;
+    }
+    const confirmMessage = deleteStudyOnDisk
+      ? `Delete study "${selectedStudy.title}" and remove its folder on disk?`
+      : `Delete study "${selectedStudy.title}" from the project?`;
+    if (!window.confirm(confirmMessage)) return;
+    try {
+      setLoading(true);
+      const project = await invoke<Project>("delete_study", {
+        args: {
+          projectId: selectedProject.id,
+          studyId: selectedStudy.id,
+          deleteOnDisk: deleteStudyOnDisk
+        }
+      });
+      setProjects((prev) =>
+        prev.map((item) => (item.id === project.id ? project : item))
+      );
+      setSelectedStudyId(project.studies[0]?.id ?? null);
+      setDeleteStudyOnDisk(false);
+    } catch (err) {
       setError(String(err));
     } finally {
       setLoading(false);
@@ -521,6 +694,105 @@ export default function App() {
     }
   };
 
+  const handleImportFiles = async () => {
+    if (!selectedProject || !selectedStudy) return;
+    try {
+      const selected = await open({
+        multiple: true,
+        directory: false,
+        title: "Import files into study"
+      });
+      const paths = Array.isArray(selected)
+        ? selected.filter(Boolean)
+        : typeof selected === "string"
+          ? [selected]
+          : [];
+      if (paths.length === 0) return;
+      setLoading(true);
+      const updatedStudy = await invoke<JsonStudy>("import_files", {
+        projectId: selectedProject.id,
+        studyId: selectedStudy.id,
+        paths
+      });
+      setProjects((prev) =>
+        prev.map((project) =>
+          project.id === selectedProject.id
+            ? {
+                ...project,
+                studies: project.studies.map((study) =>
+                  study.id === updatedStudy.id ? updatedStudy : study
+                )
+              }
+            : project
+        )
+      );
+      setSelectedStudyId(updatedStudy.id);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRemoveFile = async (path: string) => {
+    if (!selectedProject || !selectedStudy) return;
+    if (!window.confirm("Remove this file from the study and delete it from disk?")) {
+      return;
+    }
+    try {
+      setLoading(true);
+      const updatedStudy = await invoke<JsonStudy>("remove_file_ref", {
+        projectId: selectedProject.id,
+        studyId: selectedStudy.id,
+        path
+      });
+      setProjects((prev) =>
+        prev.map((project) =>
+          project.id === selectedProject.id
+            ? {
+                ...project,
+                studies: project.studies.map((study) =>
+                  study.id === updatedStudy.id ? updatedStudy : study
+                )
+              }
+            : project
+        )
+      );
+      setSelectedStudyId(updatedStudy.id);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const buildFilePath = (rootPath: string, relPath: string) => {
+    const separator = rootPath.includes("\\") ? "\\" : "/";
+    const root = rootPath.replace(/[\\/]+$/, "");
+    const rel = relPath.replace(/[\\/]+/g, separator);
+    return `${root}${separator}${rel}`;
+  };
+
+  const isImageKind = (kind: string) => ["png", "jpg"].includes(kind);
+
+  useEffect(() => {
+    const loadRootInfo = async () => {
+      if (!selectedProject) {
+        setSelectedRootInfo(null);
+        return;
+      }
+      try {
+        const info = await invoke<RootDirInfo>("check_root_dir", {
+          rootDir: selectedProject.rootPath
+        });
+        setSelectedRootInfo(info);
+      } catch (err) {
+        setSelectedRootInfo(null);
+      }
+    };
+    loadRootInfo();
+  }, [selectedProject?.rootPath]);
+
   return (
     <div className="app">
       <header className="app-header">
@@ -552,7 +824,12 @@ export default function App() {
         <section className="panel">
           <div className="panel-header">
             <h2>Projects</h2>
-            <button onClick={openProjectModal}>New Project</button>
+            <div className="inline-actions">
+              <button onClick={openProjectModal}>New Project</button>
+              <button onClick={openProjectSettings} disabled={!selectedProject}>
+                Project Settings
+              </button>
+            </div>
           </div>
           <div className="panel-body">
             {projects.length === 0 && <p className="muted">No projects yet.</p>}
@@ -586,6 +863,19 @@ export default function App() {
           </div>
           <div className="panel-body">
             {!selectedProjectId && <p className="muted">Select a project.</p>}
+            {selectedProjectId && selectedProject && (
+              <div className="project-meta">
+                <p className="muted">Root: {selectedProject.rootPath}</p>
+                {selectedRootInfo?.isGitRepo && (
+                  <>
+                    <span className="pill">Git repo detected</span>
+                    <p className="muted">
+                      This project is a Git repo; imports will be committed normally.
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
             {selectedProjectId && studies.length === 0 && (
               <p className="muted">No studies yet.</p>
             )}
@@ -637,58 +927,151 @@ export default function App() {
             {!selectedStudy && <p className="muted">Select a study.</p>}
             {selectedStudy && (
               <div className="detail-content">
-                <div className="detail-row">
-                  <div>
-                    <h3>{selectedStudy.title}</h3>
-                    <p className="muted">Stable ID: {selectedStudy.id}</p>
-                    <p className="muted">Created: {selectedStudy.createdAt}</p>
-                    {selectedStudy.folderPath && (
-                      <p className="muted">Folder: {selectedStudy.folderPath}</p>
-                    )}
-                  </div>
-                  <div>
-                    {!isEditingStudyTitle && (
-                      <button
-                        onClick={() => {
-                          setError(null);
-                          setStudyTitleDraft(selectedStudy.title);
-                          setIsEditingStudyTitle(true);
-                        }}
-                      >
-                        Rename Study
-                      </button>
-                    )}
-                    <button onClick={handleRenameJsonFolder}>
-                      Rename Folder
-                    </button>
-                  </div>
+                <div className="tabs">
+                  <button
+                    className={studyTab === "overview" ? "active" : ""}
+                    onClick={() => setStudyTab("overview")}
+                  >
+                    Overview
+                  </button>
+                  <button
+                    className={studyTab === "files" ? "active" : ""}
+                    onClick={() => setStudyTab("files")}
+                  >
+                    Files
+                  </button>
+                  <button
+                    className={studyTab === "danger" ? "active" : ""}
+                    onClick={() => setStudyTab("danger")}
+                  >
+                    Danger Zone
+                  </button>
                 </div>
-                {isEditingStudyTitle && (
-                  <div className="detail-row">
-                    <div>
-                      <label>Study Title</label>
+
+                {studyTab === "overview" && (
+                  <>
+                    <div className="detail-row">
+                      <div>
+                        <h3>{selectedStudy.title}</h3>
+                        <p className="muted">Stable ID: {selectedStudy.id}</p>
+                        <p className="muted">Created: {selectedStudy.createdAt}</p>
+                        {selectedStudy.folderPath && (
+                          <p className="muted">Folder: {selectedStudy.folderPath}</p>
+                        )}
+                      </div>
+                      <div>
+                        {!isEditingStudyTitle && (
+                          <button
+                            onClick={() => {
+                              setError(null);
+                              setStudyTitleDraft(selectedStudy.title);
+                              setIsEditingStudyTitle(true);
+                            }}
+                          >
+                            Rename Study
+                          </button>
+                        )}
+                        <button onClick={handleRenameJsonFolder}>
+                          Rename Folder
+                        </button>
+                      </div>
+                    </div>
+                    {isEditingStudyTitle && (
+                      <div className="detail-row">
+                        <div>
+                          <label>Study Title</label>
+                          <input
+                            value={studyTitleDraft}
+                            onChange={(event) =>
+                              setStudyTitleDraft(event.target.value)
+                            }
+                          />
+                          {!studyTitleDraft.trim() && (
+                            <p className="muted">Title is required.</p>
+                          )}
+                        </div>
+                        <div>
+                          <button
+                            onClick={handleRenameJsonStudy}
+                            disabled={!studyTitleDraft.trim()}
+                          >
+                            Save
+                          </button>
+                          <button
+                            className="ghost"
+                            onClick={() => setIsEditingStudyTitle(false)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {studyTab === "files" && (
+                  <div className="files">
+                    <div className="panel-header compact">
+                      <h3>Imported Files</h3>
+                      <button onClick={handleImportFiles}>Import files</button>
+                    </div>
+                    {(selectedStudy.files ?? []).length === 0 && (
+                      <p className="muted">No files yet.</p>
+                    )}
+                    {(selectedStudy.files ?? []).length > 0 && (
+                      <ul className="file-list">
+                        {(selectedStudy.files ?? []).map((file) => (
+                          <li key={file.path}>
+                            <div className="file-row">
+                              <div>
+                                <strong>{file.name}</strong>
+                                <div className="file-meta">
+                                  <span className="file-kind">{file.kind}</span>
+                                  <span>{file.path}</span>
+                                </div>
+                              </div>
+                              {selectedProject && isImageKind(file.kind) && (
+                                <img
+                                  src={convertFileSrc(
+                                    buildFilePath(selectedProject.rootPath, file.path)
+                                  )}
+                                  alt={file.name}
+                                  className="file-preview"
+                                />
+                              )}
+                            </div>
+                            <button
+                              className="ghost"
+                              onClick={() => handleRemoveFile(file.path)}
+                            >
+                              Remove
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+
+                {studyTab === "danger" && (
+                  <div className="danger-zone">
+                    <p className="muted">
+                      Deleting a study removes it from the project. You can
+                      optionally delete its folder on disk.
+                    </p>
+                    <label className="checkbox compact">
                       <input
-                        value={studyTitleDraft}
-                        onChange={(event) => setStudyTitleDraft(event.target.value)}
+                        type="checkbox"
+                        checked={deleteStudyOnDisk}
+                        onChange={(event) =>
+                          setDeleteStudyOnDisk(event.target.checked)
+                        }
                       />
-                      {!studyTitleDraft.trim() && (
-                        <p className="muted">Title is required.</p>
-                      )}
-                    </div>
-                    <div>
-                      <button
-                        onClick={handleRenameJsonStudy}
-                        disabled={!studyTitleDraft.trim()}
-                      >
-                        Save
-                      </button>
-                      <button
-                        className="ghost"
-                        onClick={() => setIsEditingStudyTitle(false)}
-                      >
-                        Cancel
-                      </button>
-                    </div>
+                      Delete study folder on disk
+                    </label>
+                    <button className="danger" onClick={handleDeleteStudy}>
+                      Delete Study
+                    </button>
                   </div>
                 )}
               </div>
@@ -791,17 +1174,54 @@ export default function App() {
                 <p className="field-error">{projectFormErrors.name}</p>
               )}
 
+              <label>Project Folder *</label>
+              <div className="inline-actions">
+                <label>
+                  <input
+                    type="radio"
+                    name="project-root-mode"
+                    checked={projectRootMode === "existing"}
+                    onChange={() => {
+                      setProjectRootMode("existing");
+                      setProjectRoot("");
+                      setProjectRootInfo(null);
+                    }}
+                  />
+                  Use existing folder
+                </label>
+                <label>
+                  <input
+                    type="radio"
+                    name="project-root-mode"
+                    checked={projectRootMode === "new"}
+                    onChange={() => {
+                      setProjectRootMode("new");
+                      setProjectRoot("");
+                      setProjectRootInfo(null);
+                    }}
+                  />
+                  Create new folder
+                </label>
+              </div>
+
               <label>Project Root Location *</label>
               <div className="inline-field">
                 <input
                   value={projectRoot}
-                  placeholder="Choose a folder"
+                  placeholder={
+                    projectRootMode === "existing"
+                      ? "Choose existing project folder"
+                      : "Choose parent folder"
+                  }
                   readOnly
                 />
                 <button onClick={handlePickProjectRoot}>Choose</button>
               </div>
               {projectFormErrors.root && (
                 <p className="field-error">{projectFormErrors.root}</p>
+              )}
+              {projectRootInfo?.isGitRepo && (
+                <p className="muted">Git repo detected in selected folder.</p>
               )}
 
               <label htmlFor="drive-url">Google Drive Folder URL (optional)</label>
@@ -817,6 +1237,52 @@ export default function App() {
                 Cancel
               </button>
               <button onClick={handleCreateProject}>Create Project</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isProjectSettingsOpen && selectedProject && (
+        <div className="modal-backdrop" onClick={closeProjectSettings}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Project Settings</h2>
+              <button className="ghost" onClick={closeProjectSettings}>
+                Close
+              </button>
+            </div>
+            <div className="modal-body">
+              <p className="muted">Project: {selectedProject.name}</p>
+              <label>Root Folder</label>
+              <div className="inline-field">
+                <input value={projectRootEdit} readOnly />
+                <button onClick={handlePickProjectRootEdit}>Choose</button>
+              </div>
+              {projectRootEditError && (
+                <p className="field-error">{projectRootEditError}</p>
+              )}
+              {(projectRootEditInfo?.isGitRepo ||
+                selectedRootInfo?.isGitRepo) && (
+                <p className="muted">Git repo detected in selected folder.</p>
+              )}
+              <label>Delete Options</label>
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={deleteProjectOnDisk}
+                  onChange={(event) => setDeleteProjectOnDisk(event.target.checked)}
+                />
+                Also delete the project folder on disk
+              </label>
+            </div>
+            <div className="modal-actions">
+              <button className="ghost" onClick={closeProjectSettings}>
+                Cancel
+              </button>
+              <button className="danger" onClick={handleDeleteProject}>
+                Delete Project
+              </button>
+              <button onClick={handleUpdateProjectRoot}>Save</button>
             </div>
           </div>
         </div>

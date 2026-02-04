@@ -1,8 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use chrono::Utc;
+use pathdiff::diff_paths;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -56,7 +59,16 @@ struct Study {
   created_at: String,
   #[serde(default)]
   #[serde(alias = "folder_path")]
-  folder_path: String
+  folder_path: String,
+  #[serde(default)]
+  files: Vec<FileRef>
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FileRef {
+  pub path: String,
+  pub name: String,
+  pub kind: String
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -94,6 +106,13 @@ struct Artifact {
 struct StudyDetail {
   study: DbStudy,
   artifacts: Vec<Artifact>
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct RootDirInfo {
+  exists: bool,
+  is_git_repo: bool
 }
 
 fn app_root(app: &AppHandle) -> Result<PathBuf, String> {
@@ -268,6 +287,68 @@ fn ensure_folders(root: &Path, folders: &[&str]) -> Result<(), String> {
   Ok(())
 }
 
+fn kind_from_ext(ext: Option<&OsStr>) -> String {
+  let value = ext
+    .and_then(|value| value.to_str())
+    .unwrap_or("")
+    .to_lowercase();
+  match value.as_str() {
+    "pdf" => "pdf".to_string(),
+    "md" | "markdown" => "md".to_string(),
+    "txt" => "txt".to_string(),
+    "doc" | "docx" => "docx".to_string(),
+    "csv" => "csv".to_string(),
+    "json" => "json".to_string(),
+    "png" => "png".to_string(),
+    "jpg" | "jpeg" => "jpg".to_string(),
+    _ => "other".to_string()
+  }
+}
+
+fn unique_dest_path(dest_dir: &Path, filename: &OsStr) -> PathBuf {
+  let candidate = dest_dir.join(filename);
+  if !candidate.exists() {
+    return candidate;
+  }
+
+  let filename_str = filename.to_string_lossy();
+  let path = Path::new(&*filename_str);
+  let stem = path
+    .file_stem()
+    .and_then(|value| value.to_str())
+    .unwrap_or("file");
+  let ext = path.extension().and_then(|value| value.to_str()).unwrap_or("");
+  let ext_suffix = if ext.is_empty() {
+    String::new()
+  } else {
+    format!(".{ext}")
+  };
+
+  for index in 1..=10_000 {
+    let next = format!("{stem} ({index}){ext_suffix}");
+    let candidate = dest_dir.join(next);
+    if !candidate.exists() {
+      return candidate;
+    }
+  }
+
+  candidate
+}
+
+fn move_file_cross_device(src: &Path, dst: &Path) -> Result<(), String> {
+  if src == dst {
+    return Ok(());
+  }
+  match fs::rename(src, dst) {
+    Ok(()) => Ok(()),
+    Err(_) => {
+      fs::copy(src, dst).map_err(|err| err.to_string())?;
+      fs::remove_file(src).map_err(|err| err.to_string())?;
+      Ok(())
+    }
+  }
+}
+
 fn should_skip(path: &Path, include_pilots: bool, condensed: bool) -> bool {
   let path_str = path.to_string_lossy().to_lowercase();
   if path_str.contains("08_osf_release") {
@@ -347,7 +428,24 @@ fn list_projects(app: AppHandle) -> Result<Vec<Project>, String> {
 struct CreateProjectArgs {
   name: String,
   root_dir: String,
+  #[serde(default)]
+  use_existing_root: bool,
   google_drive_url: Option<String>
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateProjectRootArgs {
+  project_id: String,
+  root_dir: String
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteProjectArgs {
+  project_id: String,
+  #[serde(default)]
+  delete_on_disk: bool
 }
 
 #[tauri::command]
@@ -362,10 +460,15 @@ fn create_project(app: AppHandle, args: CreateProjectArgs) -> Result<Project, St
     return Err("Project root location must be an existing folder.".to_string());
   }
 
-  let root = root_dir_path.join(trimmed_name);
-  if root.exists() {
-    return Err("Project folder already exists.".to_string());
-  }
+  let root = if args.use_existing_root {
+    root_dir_path
+  } else {
+    let root = root_dir_path.join(trimmed_name);
+    if root.exists() {
+      return Err("Project folder already exists.".to_string());
+    }
+    root
+  };
   ensure_folders(&root, PROJECT_FOLDERS)?;
 
   let project = Project {
@@ -391,6 +494,61 @@ fn create_project(app: AppHandle, args: CreateProjectArgs) -> Result<Project, St
   write_projects_store(&app, &store)?;
 
   Ok(project)
+}
+
+#[tauri::command]
+fn update_project_root(app: AppHandle, args: UpdateProjectRootArgs) -> Result<Project, String> {
+  let root_dir_path = PathBuf::from(args.root_dir.trim());
+  if !root_dir_path.exists() || !root_dir_path.is_dir() {
+    return Err("Project root location must be an existing folder.".to_string());
+  }
+
+  let mut store = read_projects_store(&app)?;
+  let project = store
+    .projects
+    .iter_mut()
+    .find(|project| project.id == args.project_id)
+    .ok_or_else(|| "Project not found.".to_string())?;
+
+  ensure_folders(&root_dir_path, PROJECT_FOLDERS)?;
+  project.root_path = root_dir_path.to_string_lossy().to_string();
+  project.updated_at = now_string();
+
+  let updated = project.clone();
+  write_projects_store(&app, &store)?;
+  Ok(updated)
+}
+
+#[tauri::command]
+fn delete_project(app: AppHandle, args: DeleteProjectArgs) -> Result<(), String> {
+  let mut store = read_projects_store(&app)?;
+  let mut root_to_delete: Option<PathBuf> = None;
+  let before = store.projects.len();
+  store.projects.retain(|project| {
+    if project.id == args.project_id {
+      if args.delete_on_disk {
+        root_to_delete = Some(PathBuf::from(project.root_path.clone()));
+      }
+      return false;
+    }
+    true
+  });
+  if store.projects.len() == before {
+    return Err("Project not found.".to_string());
+  }
+
+  if let Some(root) = root_to_delete {
+    let normalized = root.to_path_buf();
+    let component_count = normalized.components().count();
+    if component_count < 2 {
+      return Err("Refusing to delete an unsafe root directory.".to_string());
+    }
+    if normalized.exists() && normalized.is_dir() {
+      fs::remove_dir_all(&normalized).map_err(|err| err.to_string())?;
+    }
+  }
+  write_projects_store(&app, &store)?;
+  Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -464,7 +622,8 @@ fn add_study(app: AppHandle, args: AddStudyArgs) -> Result<Project, String> {
       trimmed_title
     },
     created_at: now_string(),
-    folder_path: study_root.to_string_lossy().to_string()
+    folder_path: study_root.to_string_lossy().to_string(),
+    files: Vec::new()
   };
 
   project.studies.push(new_study);
@@ -929,6 +1088,149 @@ fn generate_osf_packages(app: AppHandle, args: GenerateOsfPackagesArgs) -> Resul
 }
 
 #[tauri::command]
+fn check_root_dir(root_dir: String) -> Result<RootDirInfo, String> {
+  let path = PathBuf::from(root_dir.trim());
+  let exists = path.exists() && path.is_dir();
+  let is_git_repo = exists && path.join(".git").exists();
+  Ok(RootDirInfo { exists, is_git_repo })
+}
+
+#[tauri::command]
+fn import_files(
+  app: AppHandle,
+  project_id: String,
+  study_id: String,
+  paths: Vec<String>
+) -> Result<Study, String> {
+  let mut store = read_projects_store(&app)?;
+  let project = store
+    .projects
+    .iter_mut()
+    .find(|project| project.id == project_id)
+    .ok_or_else(|| "Project not found.".to_string())?;
+  let project_root = PathBuf::from(project.root_path.clone());
+
+  let study = project
+    .studies
+    .iter_mut()
+    .find(|study| study.id == study_id)
+    .ok_or_else(|| "Study not found.".to_string())?;
+
+  let dest_dir = project_root
+    .join("studies")
+    .join(&study.id)
+    .join("sources");
+  fs::create_dir_all(&dest_dir).map_err(|err| err.to_string())?;
+
+  let mut known_paths: HashSet<String> =
+    study.files.iter().map(|file| file.path.clone()).collect();
+
+  for source in paths {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+      continue;
+    }
+    let src = PathBuf::from(trimmed);
+    if !src.exists() || !src.is_file() {
+      continue;
+    }
+    let filename = match src.file_name() {
+      Some(value) => value,
+      None => continue
+    };
+
+    let dest_path = if src.starts_with(&dest_dir) {
+      src.clone()
+    } else {
+      unique_dest_path(&dest_dir, filename)
+    };
+
+    let rel_path = diff_paths(&dest_path, &project_root).unwrap_or(dest_path.clone());
+    let mut rel_string = rel_path.to_string_lossy().to_string();
+    if rel_string.contains('\\') {
+      rel_string = rel_string.replace('\\', "/");
+    }
+
+    if known_paths.contains(&rel_string) {
+      continue;
+    }
+
+    if src != dest_path {
+      move_file_cross_device(&src, &dest_path)?;
+    }
+
+    let name = dest_path
+      .file_name()
+      .and_then(|value| value.to_str())
+      .unwrap_or("file")
+      .to_string();
+    let kind = kind_from_ext(dest_path.extension());
+
+    study.files.push(FileRef {
+      path: rel_string.clone(),
+      name,
+      kind
+    });
+    known_paths.insert(rel_string);
+  }
+
+  project.updated_at = now_string();
+  let updated = study.clone();
+  write_projects_store(&app, &store)?;
+  Ok(updated)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoveFileArgs {
+  project_id: String,
+  study_id: String,
+  path: String
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteStudyArgs {
+  project_id: String,
+  study_id: String,
+  #[serde(default)]
+  delete_on_disk: bool
+}
+
+#[tauri::command]
+fn remove_file_ref(app: AppHandle, args: RemoveFileArgs) -> Result<Study, String> {
+  let mut store = read_projects_store(&app)?;
+  let project = store
+    .projects
+    .iter_mut()
+    .find(|project| project.id == args.project_id)
+    .ok_or_else(|| "Project not found.".to_string())?;
+  let project_root = PathBuf::from(project.root_path.clone());
+
+  let study = project
+    .studies
+    .iter_mut()
+    .find(|study| study.id == args.study_id)
+    .ok_or_else(|| "Study not found.".to_string())?;
+
+  let rel = args.path.trim();
+  if !rel.is_empty() {
+    let candidate = project_root.join(rel);
+    let candidate = fs::canonicalize(&candidate).unwrap_or(candidate);
+    let root = fs::canonicalize(&project_root).unwrap_or(project_root.clone());
+    if candidate.starts_with(&root) && candidate.is_file() {
+      let _ = fs::remove_file(&candidate);
+    }
+  }
+
+  study.files.retain(|file| file.path != rel);
+  project.updated_at = now_string();
+  let updated = study.clone();
+  write_projects_store(&app, &store)?;
+  Ok(updated)
+}
+
+#[tauri::command]
 fn git_status() -> Result<String, String> {
   let repo_root = std::env::current_dir().map_err(|err| err.to_string())?;
   let output = Command::new("git")
@@ -984,16 +1286,70 @@ fn git_commit_push(message: String) -> Result<String, String> {
   Ok(format!("{}{}", commit_stdout, push_stdout))
 }
 
+#[tauri::command]
+fn delete_study(app: AppHandle, args: DeleteStudyArgs) -> Result<Project, String> {
+  let mut store = read_projects_store(&app)?;
+  let project = store
+    .projects
+    .iter_mut()
+    .find(|project| project.id == args.project_id)
+    .ok_or_else(|| "Project not found.".to_string())?;
+
+  let mut removed_path: Option<PathBuf> = None;
+  let before = project.studies.len();
+  project.studies.retain(|study| {
+    if study.id == args.study_id {
+      if args.delete_on_disk {
+        if !study.folder_path.trim().is_empty() {
+          removed_path = Some(PathBuf::from(study.folder_path.clone()));
+        } else {
+          removed_path = Some(
+            PathBuf::from(project.root_path.clone())
+              .join("studies")
+              .join(&study.id)
+          );
+        }
+      }
+      return false;
+    }
+    true
+  });
+
+  if project.studies.len() == before {
+    return Err("Study not found.".to_string());
+  }
+
+  if let Some(folder) = removed_path {
+    let root = fs::canonicalize(PathBuf::from(project.root_path.clone()))
+      .unwrap_or_else(|_| PathBuf::from(project.root_path.clone()));
+    let target = fs::canonicalize(&folder).unwrap_or(folder);
+    if target.starts_with(&root) && target.is_dir() {
+      fs::remove_dir_all(&target).map_err(|err| err.to_string())?;
+    }
+  }
+
+  project.updated_at = now_string();
+  let updated = project.clone();
+  write_projects_store(&app, &store)?;
+  Ok(updated)
+}
+
 fn main() {
   tauri::Builder::default()
     .invoke_handler(tauri::generate_handler![
       init_db,
       list_projects,
       create_project,
+      update_project_root,
+      delete_project,
       add_study,
       rename_study_json,
       rename_study_folder_json,
       migrate_json_to_sqlite,
+      check_root_dir,
+      import_files,
+      remove_file_ref,
+      delete_study,
       list_studies,
       create_study,
       rename_study,

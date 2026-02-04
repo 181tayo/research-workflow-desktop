@@ -89,7 +89,8 @@ input {
 }
 
 .list,
-.artifact-list {
+.artifact-list,
+.file-list {
   list-style: none;
   padding: 0;
   margin: 0;
@@ -110,6 +111,7 @@ input {
   flex-direction: column;
   gap: 4px;
   cursor: pointer;
+  color: #1b2a24;
 }
 
 .list button span,
@@ -135,6 +137,37 @@ input {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.tabs {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid #e0d7cb;
+  padding-bottom: 8px;
+}
+
+.tabs button {
+  background: transparent;
+  color: #2f3a3f;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 6px 12px;
+}
+
+.tabs button.active {
+  background: #e4efe1;
+  border-color: #2c4d3b;
+  color: #1b2a24;
+}
+
+.danger-zone {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #f5b7b2;
+  border-radius: 12px;
+  background: #ffe9e7;
 }
 
 .detail-row {
@@ -165,11 +198,69 @@ input {
   border: 1px solid #e0d7cb;
 }
 
+.file-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  background: #fff;
+  border-radius: 10px;
+  padding: 10px 12px;
+  border: 1px solid #e0d7cb;
+}
+
 .artifact-list li span {
   display: block;
   color: #4f5a5f;
   font-size: 12px;
   margin-top: 2px;
+}
+
+.file-list li span {
+  display: block;
+  color: #4f5a5f;
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.file-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.file-kind {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #cfd7cc;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: #2f3a3f;
+  background: #f4f6f1;
+}
+
+.file-preview {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid #e0d7cb;
+  background: #f7f3ee;
+}
+
+.project-meta {
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 button {
@@ -184,6 +275,15 @@ button {
 button.ghost {
   background: transparent;
   color: #2c4d3b;
+}
+
+button.danger {
+  background: #b73a34;
+  border-color: #8f2a25;
+}
+
+button.danger:hover {
+  background: #a2332e;
 }
 
 button:disabled {
@@ -277,6 +377,24 @@ button:disabled {
 
 .inline-field input {
   flex: 1;
+}
+
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #2f3a3f;
+}
+
+.checkbox input {
+  width: 16px;
+  height: 16px;
+}
+
+.checkbox.compact {
+  font-size: 12px;
+  color: #5c6468;
 }
 
 .modal-actions {

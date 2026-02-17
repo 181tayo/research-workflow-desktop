@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/tauri";
 import { open } from "@tauri-apps/api/dialog";
+import { AnalysisTemplateWizard } from "./components/AnalysisTemplateWizard";
+import { AnalysisTemplateOptions } from "./types/analysisTemplate";
 
 const STATUSES = [
   "planning",
@@ -21,6 +23,12 @@ type Project = {
   createdAt: string;
   updatedAt?: string;
   googleDriveUrl?: string | null;
+  analysisPackageDefaults?: {
+    cleaning: string[];
+    plot: string[];
+    table: string[];
+    analysis: string[];
+  } | null;
   studies: JsonStudy[];
 };
 
@@ -101,6 +109,17 @@ export default function App() {
   );
   const [deleteProjectOnDisk, setDeleteProjectOnDisk] = useState(false);
   const [deleteStudyOnDisk, setDeleteStudyOnDisk] = useState(false);
+  const [isAnalysisModalOpen, setIsAnalysisModalOpen] = useState(false);
+  const [analysisTarget, setAnalysisTarget] = useState<{
+    projectId: string;
+    studyId: string;
+  } | null>(null);
+  const [isRemoveAnalysisModalOpen, setIsRemoveAnalysisModalOpen] = useState(false);
+  const [removeAnalysisTarget, setRemoveAnalysisTarget] = useState<{
+    projectId: string;
+    studyId: string;
+  } | null>(null);
+  const [analysisFiles, setAnalysisFiles] = useState<string[]>([]);
   const [studyTab, setStudyTab] = useState<"overview" | "files" | "danger">(
     "overview"
   );
@@ -734,6 +753,85 @@ export default function App() {
     }
   };
 
+  const handleAddAnalysis = async (
+    projectId: string,
+    studyId: string,
+    options: AnalysisTemplateOptions
+  ) => {
+    try {
+      setError(null);
+      setLoading(true);
+      const message = await invoke<string>("create_analysis_template", {
+        projectId,
+        studyId,
+        options
+      });
+      alert(message);
+      closeAnalysisModal();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const openAnalysisModal = (projectId: string, studyId: string) => {
+    setError(null);
+    setAnalysisTarget({ projectId, studyId });
+    setIsAnalysisModalOpen(true);
+  };
+
+  const openRemoveAnalysisModal = async (projectId: string, studyId: string) => {
+    try {
+      setLoading(true);
+      const files = await invoke<string[]>("list_analysis_templates", {
+        args: { projectId, studyId }
+      });
+      setAnalysisFiles(files);
+      setRemoveAnalysisTarget({ projectId, studyId });
+      setIsRemoveAnalysisModalOpen(true);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const closeRemoveAnalysisModal = () => {
+    setIsRemoveAnalysisModalOpen(false);
+    setRemoveAnalysisTarget(null);
+    setAnalysisFiles([]);
+  };
+
+  const handleRemoveAnalysis = async (
+    projectId: string,
+    studyId: string,
+    name: string
+  ) => {
+    if (!window.confirm(`Delete analysis "${name}.Rmd" from this study?`)) return;
+    try {
+      setLoading(true);
+      const message = await invoke<string>("delete_analysis_template", {
+        args: {
+          projectId,
+          studyId,
+          analysisName: name.trim()
+        }
+      });
+      setAnalysisFiles((prev) => prev.filter((item) => item !== name));
+      alert(message);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const closeAnalysisModal = () => {
+    setIsAnalysisModalOpen(false);
+    setAnalysisTarget(null);
+  };
+
   const handleRemoveFile = async (path: string) => {
     if (!selectedProject || !selectedStudy) return;
     if (!window.confirm("Remove this file from the study and delete it from disk?")) {
@@ -882,13 +980,41 @@ export default function App() {
             <ul className="list">
               {studies.map((study) => (
                 <li key={study.id}>
-                  <button
-                    className={study.id === selectedStudyId ? "active" : ""}
-                    onClick={() => setSelectedStudyId(study.id)}
-                  >
-                    <strong>{study.title}</strong>
-                    <span>{study.createdAt}</span>
-                  </button>
+                  <div className="list-row">
+                    <button
+                      className={`study-select ${
+                        study.id === selectedStudyId ? "active" : ""
+                      }`}
+                      onClick={() => setSelectedStudyId(study.id)}
+                    >
+                      <strong>{study.title}</strong>
+                      <span>{study.createdAt}</span>
+                    </button>
+                    <button
+                      className="list-action"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if (selectedProjectId) {
+                          openAnalysisModal(selectedProjectId, study.id);
+                        }
+                      }}
+                      disabled={!selectedProjectId}
+                    >
+                      Add analysis
+                    </button>
+                    <button
+                      className="list-action ghost"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if (selectedProjectId) {
+                          openRemoveAnalysisModal(selectedProjectId, study.id);
+                        }
+                      }}
+                      disabled={!selectedProjectId}
+                    >
+                      Remove analysis
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -1237,6 +1363,64 @@ export default function App() {
                 Cancel
               </button>
               <button onClick={handleCreateProject}>Create Project</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isAnalysisModalOpen && analysisTarget && (
+        <AnalysisTemplateWizard
+          isOpen={isAnalysisModalOpen}
+          projectId={analysisTarget.projectId}
+          studyId={analysisTarget.studyId}
+          loading={loading}
+          onClose={closeAnalysisModal}
+          onSubmit={(options) =>
+            handleAddAnalysis(
+              analysisTarget.projectId,
+              analysisTarget.studyId,
+              options
+            )
+          }
+        />
+      )}
+
+      {isRemoveAnalysisModalOpen && removeAnalysisTarget && (
+        <div className="modal-backdrop" onClick={closeRemoveAnalysisModal}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Remove Analysis</h2>
+              <button className="ghost" onClick={closeRemoveAnalysisModal}>
+                Close
+              </button>
+            </div>
+            <div className="modal-body">
+              {analysisFiles.length === 0 && (
+                <p className="muted">No analysis files found.</p>
+              )}
+              {analysisFiles.length > 0 && (
+                <ul className="list">
+                  {analysisFiles.map((name) => (
+                    <li key={name}>
+                      <div className="list-row">
+                        <div className="analysis-name">{name}.Rmd</div>
+                        <button
+                          className="danger"
+                          onClick={() =>
+                            handleRemoveAnalysis(
+                              removeAnalysisTarget.projectId,
+                              removeAnalysisTarget.studyId,
+                              name
+                            )
+                          }
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           </div>
         </div>

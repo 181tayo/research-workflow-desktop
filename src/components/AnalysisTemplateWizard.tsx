@@ -98,6 +98,7 @@ const STEP_TITLES = [
 ];
 
 const defaultOptions = (): AnalysisTemplateOptions => ({
+  analysisFileName: "analysis",
   datasetPathHint: "data/clean/analysis.csv",
   outcomeVarHint: "y",
   treatmentVarHint: "treat",
@@ -171,6 +172,16 @@ export function AnalysisTemplateWizard({
       return (
         <div className="wizard-step">
           <p className="muted">These are placeholders only; replace during cleaning.</p>
+          <label>
+            Analysis file name (without extension)
+            <input
+              value={options.analysisFileName ?? ""}
+              onChange={(event) =>
+                setOptions((prev) => ({ ...prev, analysisFileName: event.target.value }))
+              }
+              placeholder="analysis or pilot_analysis"
+            />
+          </label>
           <label>
             Dataset path hint
             <input
@@ -377,10 +388,10 @@ export function AnalysisTemplateWizard({
                 setOptions((prev) => ({ ...prev, exportArtifacts: event.target.checked }))
               }
             />
-            Include export scaffolding to analysis/output/{"{tables,figures}"}
+            Include export scaffolding to {"07_outputs/{tables,figures,reports}"}
           </label>
           <p className="muted">
-            Output paths: analysis/output/tables and analysis/output/figures
+            Output paths: 07_outputs/tables, 07_outputs/figures, 07_outputs/reports
           </p>
         </div>
       );
@@ -390,6 +401,7 @@ export function AnalysisTemplateWizard({
       <div className="wizard-step">
         <h3>Review</h3>
         <ul className="wizard-review-list">
+          <li>Analysis file: {(options.analysisFileName || "analysis").trim() || "analysis"}.Rmd</li>
           <li>Dataset hint: {options.datasetPathHint || "(blank)"}</li>
           <li>Descriptives: {options.descriptives.join(", ") || "none"}</li>
           <li>Plots: {options.plots.join(", ") || "none"}</li>

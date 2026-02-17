@@ -51,6 +51,7 @@ export type TableType =
   | "marginal_effects_table";
 
 export interface AnalysisTemplateOptions {
+  analysisFileName?: string;
   datasetPathHint?: string;
   outcomeVarHint?: string;
   treatmentVarHint?: string;

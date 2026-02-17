@@ -21,10 +21,188 @@ const STUDY_FOLDERS: &[&str] = &[
   "04_prereg",
   "05_data",
   "06_analysis",
-  "07_reports",
+  "07_outputs",
   "08_osf_release"
 ];
 const ANALYSIS_FOLDER: &str = "06_analysis";
+const STYLE_KIT_DIR: &str = "R/style";
+const ANALYSIS_CONFIG_PATH: &str = "config/analysis_defaults.json";
+
+const DEFAULT_ANALYSIS_CONFIG_JSON: &str = r#"{
+  "version": 1,
+  "styleKit": {
+    "mode": "project",
+    "path": "R/style"
+  },
+  "modules": {
+    "plots": true,
+    "tables": true
+  },
+  "plots": {
+    "base_family": "Times New Roman",
+    "base_size": 12,
+    "dpi": 300,
+    "ggpubr_palette": "jco"
+  },
+  "tables": {
+    "font_family": "Times New Roman",
+    "font_size": 12,
+    "header_bold": true,
+    "autofit": true
+  }
+}"#;
+
+const THEME_PLOTS_R: &str = r#"# R/style/theme_plots.R
+
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(ggpubr)
+  library(rlang)
+})
+
+theme_apa <- function(base_size = 12, base_family = "Times New Roman") {
+  ggplot2::theme_classic(base_size = base_size, base_family = base_family) +
+    ggplot2::theme(
+      plot.title = element_text(face = "bold", size = base_size + 2, hjust = 0),
+      plot.subtitle = element_text(size = base_size, hjust = 0),
+      plot.caption = element_text(size = base_size - 2, hjust = 1),
+      axis.title = element_text(size = base_size),
+      axis.text  = element_text(size = base_size - 1),
+      legend.title = element_text(size = base_size - 1),
+      legend.text = element_text(size = base_size - 1),
+      panel.grid.major.y = element_line(linewidth = 0.25, color = "grey85"),
+      panel.grid.minor = element_blank(),
+      axis.line = element_line(linewidth = 0.5, color = "black"),
+      plot.margin = margin(10, 10, 10, 10)
+    )
+}
+
+set_apa_plot_defaults <- function(base_size = 12, base_family = "Times New Roman") {
+  ggplot2::theme_set(theme_apa(base_size = base_size, base_family = base_family))
+  invisible(TRUE)
+}
+
+apa_scatter <- function(df, x, y, add_lm = FALSE, se = TRUE, ...) {
+  xq <- enquo(x); yq <- enquo(y)
+  p <- ggplot(df, aes(x = !!xq, y = !!yq)) +
+    geom_point(...) +
+    theme_apa()
+  if (isTRUE(add_lm)) {
+    p <- p + geom_smooth(method = "lm", se = se, linewidth = 0.6)
+  }
+  p
+}
+
+apa_hist <- function(df, x, bins = 30, ...) {
+  xq <- enquo(x)
+  ggplot(df, aes(x = !!xq)) +
+    geom_histogram(bins = bins, ...) +
+    theme_apa()
+}
+
+apa_box <- function(df, x, y, ...) {
+  xq <- enquo(x); yq <- enquo(y)
+  ggplot(df, aes(x = !!xq, y = !!yq)) +
+    geom_boxplot(...) +
+    theme_apa()
+}
+"#;
+
+const TABLES_FLEXTABLE_R: &str = r#"# R/style/tables_flextable.R
+
+suppressPackageStartupMessages({
+  library(flextable)
+})
+
+ft_apa <- function(x,
+                   font_family = "Times New Roman",
+                   font_size = 12,
+                   header_bold = TRUE,
+                   autofit = TRUE) {
+  ft <- flextable::flextable(x)
+  ft <- flextable::font(ft, fontname = font_family, part = "all")
+  ft <- flextable::fontsize(ft, size = font_size, part = "all")
+  ft <- flextable::align(ft, align = "center", part = "header")
+  ft <- flextable::align(ft, align = "center", part = "body")
+  ft <- flextable::border_remove(ft)
+  ft <- flextable::hline_top(ft, border = fp_border(width = 1))
+  ft <- flextable::hline(ft, i = 1, border = fp_border(width = 1), part = "header")
+  ft <- flextable::hline_bottom(ft, border = fp_border(width = 1))
+  if (isTRUE(header_bold)) {
+    ft <- flextable::bold(ft, part = "header")
+  }
+  if (isTRUE(autofit)) {
+    ft <- flextable::autofit(ft)
+  }
+  ft
+}
+
+ft_apa_descriptives <- function(df, digits = 2) {
+  # Basic descriptive summary for numeric columns
+  num <- df[, vapply(df, is.numeric, logical(1)), drop = FALSE]
+  if (ncol(num) == 0) stop("No numeric columns found for descriptives.")
+  out <- data.frame(
+    Variable = names(num),
+    N = vapply(num, function(x) sum(!is.na(x)), numeric(1)),
+    Mean = vapply(num, function(x) mean(x, na.rm = TRUE), numeric(1)),
+    SD = vapply(num, function(x) stats::sd(x, na.rm = TRUE), numeric(1)),
+    Min = vapply(num, function(x) min(x, na.rm = TRUE), numeric(1)),
+    Max = vapply(num, function(x) max(x, na.rm = TRUE), numeric(1)),
+    check.names = FALSE
+  )
+  out$Mean <- round(out$Mean, digits)
+  out$SD   <- round(out$SD, digits)
+  out$Min  <- round(out$Min, digits)
+  out$Max  <- round(out$Max, digits)
+
+  ft_apa(out)
+}
+
+ft_apa_regression <- function(model, ...) {
+  stop("ft_apa_regression() is a placeholder. Consider using broom + dplyr to create a data.frame, then pass to ft_apa().")
+}
+"#;
+
+const STYLE_INIT_R: &str = r#"# R/style/style_init.R
+
+suppressPackageStartupMessages({
+  library(here)
+})
+
+init_project_style <- function(config_path = here::here("config/analysis_defaults.json")) {
+  cfg <- list(
+    plots = list(base_family = "Times New Roman", base_size = 12),
+    tables = list(font_family = "Times New Roman", font_size = 12, header_bold = TRUE, autofit = TRUE)
+  )
+
+  if (file.exists(config_path)) {
+    if (requireNamespace("jsonlite", quietly = TRUE)) {
+      user_cfg <- jsonlite::fromJSON(config_path, simplifyVector = TRUE)
+      # shallow merge
+      if (!is.null(user_cfg$plots)) cfg$plots <- modifyList(cfg$plots, user_cfg$plots)
+      if (!is.null(user_cfg$tables)) cfg$tables <- modifyList(cfg$tables, user_cfg$tables)
+    }
+  }
+
+  # Apply plot defaults if available
+  if (exists("set_apa_plot_defaults", mode = "function")) {
+    set_apa_plot_defaults(base_size = cfg$plots$base_size, base_family = cfg$plots$base_family)
+  }
+
+  invisible(cfg)
+}
+"#;
+
+const STYLE_README_MD: &str = r#"# Project Style Kit
+
+This folder contains shared, project-level styling helpers used by generated analysis templates.
+
+- `theme_plots.R`: APA-ish plot theme and helper plot wrappers.
+- `tables_flextable.R`: APA-ish table formatting helpers with `flextable`.
+- `style_init.R`: Initializes style defaults from `config/analysis_defaults.json`.
+
+Customize these files once to affect all future analyses that source them.
+"#;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -314,6 +492,7 @@ struct AnalysisPackages {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AnalysisTemplateOptions {
+  analysis_file_name: Option<String>,
   dataset_path_hint: Option<String>,
   outcome_var_hint: Option<String>,
   treatment_var_hint: Option<String>,
@@ -350,12 +529,107 @@ fn hint_or_default(value: &Option<String>, fallback: &str) -> String {
     .to_string()
 }
 
+fn normalized_analysis_file_base(value: &Option<String>) -> Result<String, String> {
+  let mut base = value
+    .as_ref()
+    .map(|item| item.trim().to_string())
+    .unwrap_or_else(|| "analysis".to_string());
+  if base.is_empty() {
+    base = "analysis".to_string();
+  }
+  if base.to_lowercase().ends_with(".rmd") && base.len() > 4 {
+    base.truncate(base.len() - 4);
+  }
+  if base.trim().is_empty() {
+    return Err("Analysis file name cannot be empty.".to_string());
+  }
+  if base.contains('/') || base.contains('\\') || base.contains("..") {
+    return Err("Analysis file name must be a single file name.".to_string());
+  }
+  Ok(base)
+}
+
+fn write_if_missing(path: &Path, content: &str) -> Result<(), String> {
+  if !path.exists() {
+    fs::write(path, content).map_err(|err| err.to_string())?;
+  }
+  Ok(())
+}
+
+fn merge_missing_json_keys(
+  current: &mut serde_json::Value,
+  defaults: &serde_json::Value
+) {
+  match (current, defaults) {
+    (serde_json::Value::Object(current_map), serde_json::Value::Object(default_map)) => {
+      for (key, default_value) in default_map {
+        match current_map.get_mut(key) {
+          Some(current_value) => merge_missing_json_keys(current_value, default_value),
+          None => {
+            current_map.insert(key.clone(), default_value.clone());
+          }
+        }
+      }
+    }
+    _ => {}
+  }
+}
+
+fn ensure_analysis_defaults_config(project_root: &Path) -> Result<(), String> {
+  let config_path = project_root.join(ANALYSIS_CONFIG_PATH);
+  if let Some(parent) = config_path.parent() {
+    fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+  }
+
+  let defaults: serde_json::Value =
+    serde_json::from_str(DEFAULT_ANALYSIS_CONFIG_JSON).map_err(|err| err.to_string())?;
+
+  if !config_path.exists() {
+    let payload = serde_json::to_string_pretty(&defaults).map_err(|err| err.to_string())?;
+    fs::write(config_path, payload).map_err(|err| err.to_string())?;
+    return Ok(());
+  }
+
+  let raw = fs::read_to_string(&config_path).map_err(|err| err.to_string())?;
+  let mut existing: serde_json::Value = if raw.trim().is_empty() {
+    serde_json::json!({})
+  } else {
+    serde_json::from_str(&raw).map_err(|err| {
+      format!(
+        "Existing analysis defaults config is not valid JSON at {}: {}",
+        config_path.to_string_lossy(),
+        err
+      )
+    })?
+  };
+
+  merge_missing_json_keys(&mut existing, &defaults);
+  let merged = serde_json::to_string_pretty(&existing).map_err(|err| err.to_string())?;
+  fs::write(config_path, merged).map_err(|err| err.to_string())?;
+  Ok(())
+}
+
+fn ensure_project_style_kit(project_root: &Path) -> Result<(), String> {
+  ensure_analysis_defaults_config(project_root)?;
+
+  let style_dir = project_root.join(STYLE_KIT_DIR);
+  fs::create_dir_all(&style_dir).map_err(|err| err.to_string())?;
+
+  write_if_missing(&style_dir.join("theme_plots.R"), THEME_PLOTS_R)?;
+  write_if_missing(&style_dir.join("tables_flextable.R"), TABLES_FLEXTABLE_R)?;
+  write_if_missing(&style_dir.join("style_init.R"), STYLE_INIT_R)?;
+  write_if_missing(&style_dir.join("README.md"), STYLE_README_MD)?;
+  Ok(())
+}
+
 fn render_packages(options: &AnalysisTemplateOptions) -> String {
   let mut packages: Vec<String> = vec![
     "tidyverse".to_string(),
     "here".to_string(),
     "janitor".to_string(),
     "ggplot2".to_string(),
+    "ggpubr".to_string(),
+    "flextable".to_string(),
     "modelsummary".to_string(),
     "broom".to_string(),
     "gt".to_string(),
@@ -784,6 +1058,7 @@ fn render_exports(options: &AnalysisTemplateOptions) -> String {
   out.push_str("```{r export_artifacts}\n");
   out.push_str("dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)\n");
   out.push_str("dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)\n");
+  out.push_str("dir.create(reports_dir, recursive = TRUE, showWarnings = FALSE)\n");
   if selected(&options.tables, "model_table") {
     out.push_str("# TODO: replace model objects with your fitted models.\n");
     out.push_str("modelsummary::modelsummary(list(m1 = m_ols), output = file.path(tables_dir, \"models.html\"))\n");
@@ -804,11 +1079,16 @@ fn render_exports(options: &AnalysisTemplateOptions) -> String {
   if selected(&options.plots, "coef_plot") {
     out.push_str("ggsave(file.path(figures_dir, \"coef_plot.png\"), plot = p_coef, width = 7, height = 5, dpi = 300)\n");
   }
+  out.push_str("# TODO: save knitted reports (html/pdf/docx) to reports_dir when rendering.\n");
   out.push_str("```\n\n");
   out
 }
 
-fn render_analysis_rmd(study_id: &str, options: &AnalysisTemplateOptions) -> String {
+fn render_analysis_rmd(
+  study_id: &str,
+  study_title: &str,
+  options: &AnalysisTemplateOptions
+) -> String {
   let dataset_path = hint_or_default(&options.dataset_path_hint, "data/clean/analysis.csv");
   let outcome = hint_or_default(&options.outcome_var_hint, "y");
   let treatment = hint_or_default(&options.treatment_var_hint, "treat");
@@ -818,18 +1098,48 @@ fn render_analysis_rmd(study_id: &str, options: &AnalysisTemplateOptions) -> Str
 
   let mut out = String::new();
   out.push_str("---\n");
-  out.push_str(&format!("title: \"Analysis Template - {}\"\n", study_id));
+  out.push_str(&format!(
+    "title: \"Analysis: {}\"\n",
+    study_title.replace('"', "\\\"")
+  ));
   out.push_str("output:\n");
-  out.push_str("  html_document: default\n");
-  out.push_str("  pdf_document: default\n");
+  out.push_str("  html_document:\n");
+  out.push_str("    toc: true\n");
+  out.push_str("    toc_depth: 3\n");
+  out.push_str("    df_print: paged\n");
   out.push_str("---\n\n");
+  out.push_str(&format!("Study ID: `{study_id}`\n\n"));
 
   out.push_str("# Setup\n\n");
-  out.push_str("```{r setup}\n");
-  out.push_str("knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)\n");
-  out.push_str("output_dir <- \"analysis/output\"\n");
+  out.push_str("```{r setup, include=FALSE}\n");
+  out.push_str("knitr::opts_chunk$set(\n");
+  out.push_str("  echo = TRUE,\n");
+  out.push_str("  message = FALSE,\n");
+  out.push_str("  warning = FALSE,\n");
+  out.push_str("  fig.retina = 2,\n");
+  out.push_str("  dpi = 300,\n");
+  out.push_str("  fig.width = 6.5,\n");
+  out.push_str("  fig.height = 4.5\n");
+  out.push_str(")\n\n");
+  out.push_str("suppressPackageStartupMessages({\n");
+  out.push_str("  library(here)\n");
+  out.push_str("  library(tidyverse)\n");
+  out.push_str("  library(ggplot2)\n");
+  out.push_str("  library(ggpubr)\n");
+  out.push_str("  library(flextable)\n");
+  out.push_str("})\n\n");
+  out.push_str("# Source project style kit\n");
+  out.push_str("source(here::here(\"R/style/theme_plots.R\"))\n");
+  out.push_str("source(here::here(\"R/style/tables_flextable.R\"))\n");
+  out.push_str("source(here::here(\"R/style/style_init.R\"))\n\n");
+  out.push_str("cfg <- init_project_style()\n\n");
+  out.push_str("output_dir <- \"../07_outputs\"\n");
   out.push_str("tables_dir <- file.path(output_dir, \"tables\")\n");
   out.push_str("figures_dir <- file.path(output_dir, \"figures\")\n");
+  out.push_str("reports_dir <- file.path(output_dir, \"reports\")\n");
+  out.push_str("dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)\n");
+  out.push_str("dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)\n");
+  out.push_str("dir.create(reports_dir, recursive = TRUE, showWarnings = FALSE)\n");
   out.push_str("```\n\n");
 
   out.push_str(&render_packages(options));
@@ -857,22 +1167,26 @@ fn render_analysis_rmd(study_id: &str, options: &AnalysisTemplateOptions) -> Str
 }
 
 fn create_analysis_template_in_dir(
+  study_root: &Path,
   analysis_dir: &Path,
   study_id: &str,
+  study_title: &str,
   options: &AnalysisTemplateOptions
 ) -> Result<PathBuf, String> {
   fs::create_dir_all(analysis_dir).map_err(|err| err.to_string())?;
-  let output_root = analysis_dir.join("output");
+  let output_root = study_root.join("07_outputs");
   fs::create_dir_all(output_root.join("tables")).map_err(|err| err.to_string())?;
   fs::create_dir_all(output_root.join("figures")).map_err(|err| err.to_string())?;
+  fs::create_dir_all(output_root.join("reports")).map_err(|err| err.to_string())?;
 
-  let mut template_path = analysis_dir.join("analysis.Rmd");
+  let file_base = normalized_analysis_file_base(&options.analysis_file_name)?;
+  let mut template_path = analysis_dir.join(format!("{file_base}.Rmd"));
   if template_path.exists() {
     let stamp = Utc::now().format("%Y%m%d_%H%M%S");
-    template_path = analysis_dir.join(format!("analysis_{stamp}.Rmd"));
+    template_path = analysis_dir.join(format!("{file_base}_{stamp}.Rmd"));
   }
 
-  let template = render_analysis_rmd(study_id, options);
+  let template = render_analysis_rmd(study_id, study_title, options);
   fs::write(&template_path, template).map_err(|err| err.to_string())?;
   Ok(template_path)
 }
@@ -1736,9 +2050,18 @@ fn create_analysis_template(
   if !study_root.exists() {
     return Err("Study folder does not exist.".to_string());
   }
+  let project_root = PathBuf::from(project.root_path.clone());
+  ensure_project_style_kit(&project_root)?;
 
   let analysis_dir = study_root.join(ANALYSIS_FOLDER);
-  let template_path = create_analysis_template_in_dir(&analysis_dir, &study_id, &options)?;
+  let template_path =
+    create_analysis_template_in_dir(
+      &study_root,
+      &analysis_dir,
+      &study_id,
+      &study.title,
+      &options
+    )?;
 
   Ok(format!(
     "Created analysis template at {}",
@@ -2099,6 +2422,7 @@ mod tests {
 
   fn empty_options() -> AnalysisTemplateOptions {
     AnalysisTemplateOptions {
+      analysis_file_name: None,
       dataset_path_hint: None,
       outcome_var_hint: None,
       treatment_var_hint: None,
@@ -2121,29 +2445,108 @@ mod tests {
   fn render_includes_selected_models_only() {
     let mut options = empty_options();
     options.models = vec!["ols".to_string()];
-    let rendered = render_analysis_rmd("S-ABC123", &options);
+    let rendered = render_analysis_rmd("S-ABC123", "Test Study", &options);
     assert!(rendered.contains("## OLS"));
     assert!(!rendered.contains("## Logistic"));
+    assert!(rendered.contains("source(here::here(\"R/style/theme_plots.R\"))"));
   }
 
   #[test]
   fn create_template_writes_file_and_output_folders() {
     let base = std::env::temp_dir().join(format!("analysis-test-{}", Uuid::new_v4()));
-    let analysis_dir = base.join("06_analysis");
+    let study_root = base.join("S-ABC123");
+    let analysis_dir = study_root.join("06_analysis");
     fs::create_dir_all(&analysis_dir).expect("failed to create temp analysis dir");
 
     let options = empty_options();
-    let first = create_analysis_template_in_dir(&analysis_dir, "S-ABC123", &options)
-      .expect("expected first template to be created");
+    let first = create_analysis_template_in_dir(
+      &study_root,
+      &analysis_dir,
+      "S-ABC123",
+      "Test Study",
+      &options
+    )
+    .expect("expected first template to be created");
     assert!(first.exists());
-    assert!(analysis_dir.join("output").exists());
-    assert!(analysis_dir.join("output").join("tables").exists());
-    assert!(analysis_dir.join("output").join("figures").exists());
+    assert!(study_root.join("07_outputs").exists());
+    assert!(study_root.join("07_outputs").join("tables").exists());
+    assert!(study_root.join("07_outputs").join("figures").exists());
+    assert!(study_root.join("07_outputs").join("reports").exists());
 
-    let second = create_analysis_template_in_dir(&analysis_dir, "S-ABC123", &options)
-      .expect("expected second template to be created with timestamp");
+    let second = create_analysis_template_in_dir(
+      &study_root,
+      &analysis_dir,
+      "S-ABC123",
+      "Test Study",
+      &options
+    )
+    .expect("expected second template to be created with timestamp");
     assert!(second.exists());
     assert_ne!(first, second);
+
+    let _ = fs::remove_dir_all(base);
+  }
+
+  #[test]
+  fn ensure_style_kit_creates_and_merges_config() {
+    let base = std::env::temp_dir().join(format!("style-kit-test-{}", Uuid::new_v4()));
+    fs::create_dir_all(base.join("config")).expect("failed to create temp config dir");
+    fs::write(
+      base.join("config").join("analysis_defaults.json"),
+      "{\n  \"version\": 9,\n  \"plots\": {\"base_size\": 10}\n}\n"
+    )
+    .expect("failed to seed config");
+
+    ensure_project_style_kit(&base).expect("style kit ensure should succeed");
+
+    assert!(base.join("R").join("style").join("theme_plots.R").exists());
+    assert!(base.join("R").join("style").join("tables_flextable.R").exists());
+    assert!(base.join("R").join("style").join("style_init.R").exists());
+    assert!(base.join("R").join("style").join("README.md").exists());
+
+    let merged_raw = fs::read_to_string(base.join("config").join("analysis_defaults.json"))
+      .expect("config should be readable");
+    let merged: serde_json::Value =
+      serde_json::from_str(&merged_raw).expect("config should be valid json");
+    assert_eq!(merged.get("version").and_then(|v| v.as_i64()), Some(9));
+    assert_eq!(
+      merged
+        .get("plots")
+        .and_then(|v| v.get("base_size"))
+        .and_then(|v| v.as_i64()),
+      Some(10)
+    );
+    assert_eq!(
+      merged
+        .get("styleKit")
+        .and_then(|v| v.get("path"))
+        .and_then(|v| v.as_str()),
+      Some("R/style")
+    );
+
+    let _ = fs::remove_dir_all(base);
+  }
+
+  #[test]
+  fn create_template_uses_custom_analysis_file_name() {
+    let base = std::env::temp_dir().join(format!("analysis-name-test-{}", Uuid::new_v4()));
+    let study_root = base.join("S-ABC123");
+    let analysis_dir = study_root.join("06_analysis");
+    fs::create_dir_all(&analysis_dir).expect("failed to create temp analysis dir");
+
+    let mut options = empty_options();
+    options.analysis_file_name = Some("pilot_analysis".to_string());
+
+    let first = create_analysis_template_in_dir(
+      &study_root,
+      &analysis_dir,
+      "S-ABC123",
+      "Test Study",
+      &options
+    )
+    .expect("expected template with custom file name");
+
+    assert!(first.ends_with("pilot_analysis.Rmd"));
 
     let _ = fs::remove_dir_all(base);
   }

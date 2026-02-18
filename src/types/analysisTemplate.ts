@@ -32,6 +32,28 @@ export type ModelType =
   | "did"
   | "event_study";
 
+export type ModelLayoutKind = "simple" | "interaction";
+
+export type ModelFigureType =
+  | "coef_plot"
+  | "fitted_plot"
+  | "residual_plot"
+  | "event_study_plot";
+
+export interface ModelLayout {
+  name: string;
+  modelType: ModelType;
+  outcomeVar: string;
+  treatmentVar: string;
+  layout: ModelLayoutKind;
+  interactionVar?: string;
+  covariates?: string;
+  idVar?: string;
+  timeVar?: string;
+  figures: ModelFigureType[];
+  includeInMainTable: boolean;
+}
+
 export type Diagnostic =
   | "linearity"
   | "normality_residuals"
@@ -52,6 +74,7 @@ export type TableType =
 
 export interface AnalysisTemplateOptions {
   analysisFileName?: string;
+  dataSourcePaths?: string[];
   datasetPathHint?: string;
   outcomeVarHint?: string;
   treatmentVarHint?: string;
@@ -65,6 +88,7 @@ export interface AnalysisTemplateOptions {
   diagnostics: Diagnostic[];
   tables: TableType[];
   robustness: string[];
+  modelLayouts?: ModelLayout[];
   exploratory: boolean;
   exportArtifacts: boolean;
 }

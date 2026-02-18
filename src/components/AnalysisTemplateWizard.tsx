@@ -4,6 +4,9 @@ import {
   BalanceCheck,
   DescriptiveBlock,
   Diagnostic,
+  ModelFigureType,
+  ModelLayout,
+  ModelLayoutKind,
   ModelType,
   PlotType,
   TableType
@@ -15,6 +18,7 @@ type WizardProps = {
   projectId: string;
   studyId: string;
   loading: boolean;
+  onPickDataSources: () => Promise<string[]>;
   onClose: () => void;
   onSubmit: (options: AnalysisTemplateOptions) => Promise<void>;
 };
@@ -57,6 +61,18 @@ const MODEL_OPTIONS: Array<{ value: ModelType; label: string }> = [
   { value: "event_study", label: "Event study" }
 ];
 
+const MODEL_LAYOUT_OPTIONS: Array<{ value: ModelLayoutKind; label: string }> = [
+  { value: "simple", label: "Simple model" },
+  { value: "interaction", label: "Interaction model" }
+];
+
+const MODEL_FIGURE_OPTIONS: Array<{ value: ModelFigureType; label: string }> = [
+  { value: "coef_plot", label: "Coefficient plot" },
+  { value: "fitted_plot", label: "Fitted vs observed" },
+  { value: "residual_plot", label: "Residual plot" },
+  { value: "event_study_plot", label: "Event-study plot" }
+];
+
 const DIAGNOSTIC_OPTIONS: Array<{ value: Diagnostic; label: string }> = [
   { value: "linearity", label: "Linearity" },
   { value: "normality_residuals", label: "Normality of residuals" },
@@ -91,7 +107,6 @@ const STEP_TITLES = [
   "Data + Variables",
   "Descriptives & Plots",
   "Balance Checks",
-  "Models",
   "Diagnostics",
   "Tables/Figures & Exports",
   "Review + Create"
@@ -99,6 +114,7 @@ const STEP_TITLES = [
 
 const defaultOptions = (): AnalysisTemplateOptions => ({
   analysisFileName: "analysis",
+  dataSourcePaths: [],
   datasetPathHint: "data/clean/analysis.csv",
   outcomeVarHint: "y",
   treatmentVarHint: "treat",
@@ -112,32 +128,74 @@ const defaultOptions = (): AnalysisTemplateOptions => ({
   diagnostics: [],
   tables: [],
   robustness: [],
+  modelLayouts: [],
   exploratory: false,
   exportArtifacts: true
 });
+
+const defaultModelLayoutDraft = (): ModelLayout => ({
+  name: "",
+  modelType: "ols",
+  outcomeVar: "y",
+  treatmentVar: "treat",
+  layout: "simple",
+  interactionVar: "",
+  covariates: "",
+  idVar: "id",
+  timeVar: "time",
+  figures: ["coef_plot"],
+  includeInMainTable: true
+});
+
+const buildDraftFormulaPreview = (draft: ModelLayout): string => {
+  const outcome = (draft.outcomeVar || "").trim() || "y";
+  const treatment = (draft.treatmentVar || "").trim() || "treat";
+  const interaction = (draft.interactionVar || "").trim() || "moderator_var";
+  const covariates = (draft.covariates || "").trim();
+
+  let rhs = draft.layout === "interaction" ? `(${treatment}) * ${interaction}` : treatment;
+  if (covariates) rhs += ` + ${covariates}`;
+
+  return `${outcome} ~ ${rhs}`;
+};
 
 export function AnalysisTemplateWizard({
   isOpen,
   projectId,
   studyId,
   loading,
+  onPickDataSources,
   onClose,
   onSubmit
 }: WizardProps) {
   const [step, setStep] = useState(0);
   const [options, setOptions] = useState<AnalysisTemplateOptions>(defaultOptions);
+  const [modelLayoutDraft, setModelLayoutDraft] = useState<ModelLayout>(defaultModelLayoutDraft);
+  const [showAllDataSources, setShowAllDataSources] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
     setStep(0);
     setOptions(defaultOptions());
+    setModelLayoutDraft(defaultModelLayoutDraft());
+    setShowAllDataSources(false);
   }, [isOpen, projectId, studyId]);
 
-  const modelKey = useMemo(() => options.models.join("|"), [options.models]);
+  const selectedModelTypes = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          ...options.models,
+          ...((options.modelLayouts ?? []).map((item) => item.modelType))
+        ])
+      ),
+    [options.models, options.modelLayouts]
+  );
+  const modelKey = useMemo(() => selectedModelTypes.join("|"), [selectedModelTypes]);
 
   useEffect(() => {
     if (!isOpen) return;
-    const suggestions = suggestDiagnostics(options.models);
+    const suggestions = suggestDiagnostics(selectedModelTypes);
     setOptions((prev) => {
       const merged = Array.from(new Set([...prev.diagnostics, ...suggestions]));
       if (
@@ -148,9 +206,15 @@ export function AnalysisTemplateWizard({
       }
       return { ...prev, diagnostics: merged };
     });
-  }, [isOpen, modelKey, options.models]);
+  }, [isOpen, modelKey, selectedModelTypes]);
 
   if (!isOpen) return null;
+
+  const textEntryProps = {
+    autoCapitalize: "none" as const,
+    autoCorrect: "off" as const,
+    spellCheck: false
+  };
 
   const toggleListValue = <K extends "descriptives" | "plots" | "balanceChecks" | "models" | "diagnostics" | "tables" | "robustness">(
     key: K,
@@ -165,7 +229,43 @@ export function AnalysisTemplateWizard({
     });
   };
 
-  const needsPanelHint = options.models.includes("did") || options.models.includes("event_study");
+  const toggleModelFigure = (figure: ModelFigureType) => {
+    setModelLayoutDraft((prev) => {
+      const current = prev.figures ?? [];
+      const next = current.includes(figure)
+        ? current.filter((value) => value !== figure)
+        : [...current, figure];
+      return { ...prev, figures: next };
+    });
+  };
+
+  const addModelLayout = () => {
+    const outcome = (modelLayoutDraft.outcomeVar || "").trim();
+    const treatment = (modelLayoutDraft.treatmentVar || "").trim();
+    if (!outcome || !treatment) return;
+
+    const modelName =
+      modelLayoutDraft.name.trim() ||
+      `${modelLayoutDraft.modelType.toUpperCase()}_${outcome.replace(/[^A-Za-z0-9]+/g, "_")}`;
+
+    const nextLayout: ModelLayout = {
+      ...modelLayoutDraft,
+      name: modelName,
+      outcomeVar: outcome,
+      treatmentVar: treatment,
+      covariates: (modelLayoutDraft.covariates || "").trim(),
+      interactionVar: (modelLayoutDraft.interactionVar || "").trim(),
+      idVar: (modelLayoutDraft.idVar || "").trim(),
+      timeVar: (modelLayoutDraft.timeVar || "").trim()
+    };
+
+    setOptions((prev) => ({
+      ...prev,
+      modelLayouts: [...(prev.modelLayouts ?? []), nextLayout],
+      models: Array.from(new Set([...prev.models, nextLayout.modelType]))
+    }));
+    setModelLayoutDraft(defaultModelLayoutDraft());
+  };
 
   const renderStep = () => {
     if (step === 0) {
@@ -175,6 +275,7 @@ export function AnalysisTemplateWizard({
           <label>
             Analysis file name (without extension)
             <input
+              {...textEntryProps}
               value={options.analysisFileName ?? ""}
               onChange={(event) =>
                 setOptions((prev) => ({ ...prev, analysisFileName: event.target.value }))
@@ -183,61 +284,269 @@ export function AnalysisTemplateWizard({
             />
           </label>
           <label>
+            Data sources (optional, multi-select)
+            <div className="inline-field">
+              <input
+                {...textEntryProps}
+                value={options.dataSourcePaths?.length ? `${options.dataSourcePaths.length} files selected` : ""}
+                readOnly
+                placeholder="Choose data files to preload in this analysis"
+              />
+              <button
+                type="button"
+                className="ghost"
+                disabled={loading}
+                onClick={async () => {
+                  const selected = await onPickDataSources();
+                  if (selected.length === 0) return;
+                  setOptions((prev) => ({
+                    ...prev,
+                    dataSourcePaths: Array.from(new Set([...(prev.dataSourcePaths ?? []), ...selected]))
+                  }));
+                }}
+              >
+                Choose
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                disabled={loading || !(options.dataSourcePaths && options.dataSourcePaths.length > 0)}
+                onClick={() => setOptions((prev) => ({ ...prev, dataSourcePaths: [] }))}
+              >
+                Clear
+              </button>
+            </div>
+          </label>
+          {options.dataSourcePaths && options.dataSourcePaths.length > 0 && (
+            <>
+              <ul className="selected-data-list">
+                {(showAllDataSources ? options.dataSourcePaths : options.dataSourcePaths.slice(0, 5)).map((path) => (
+                <li key={path} className="selected-data-item">
+                  <span title={path}>{path}</span>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() =>
+                      setOptions((prev) => ({
+                        ...prev,
+                        dataSourcePaths: (prev.dataSourcePaths ?? []).filter((item) => item !== path)
+                      }))
+                    }
+                  >
+                    Remove
+                  </button>
+                </li>
+                ))}
+              </ul>
+              {options.dataSourcePaths.length > 5 && (
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => setShowAllDataSources((prev) => !prev)}
+                >
+                  {showAllDataSources ? "Collapse list" : `Show all (${options.dataSourcePaths.length})`}
+                </button>
+              )}
+            </>
+          )}
+          <label>
             Dataset path hint
             <input
+              {...textEntryProps}
               value={options.datasetPathHint ?? ""}
               onChange={(event) =>
                 setOptions((prev) => ({ ...prev, datasetPathHint: event.target.value }))
               }
             />
           </label>
-          <label>
-            Outcome variable hint
-            <input
-              value={options.outcomeVarHint ?? ""}
-              onChange={(event) =>
-                setOptions((prev) => ({ ...prev, outcomeVarHint: event.target.value }))
-              }
-            />
-          </label>
-          <label>
-            Treatment variable hint
-            <input
-              value={options.treatmentVarHint ?? ""}
-              onChange={(event) =>
-                setOptions((prev) => ({ ...prev, treatmentVarHint: event.target.value }))
-              }
-            />
-          </label>
-          <div className="inline-field">
+          <h3>Model Layout Builder</h3>
+          <p className="muted">
+            Add all intended models here. Model-dependent sections run across this list.
+          </p>
+          <div className="wizard-grid">
             <label>
-              ID variable hint
+              Model name
               <input
-                value={options.idVarHint ?? ""}
+                {...textEntryProps}
+                value={modelLayoutDraft.name}
                 onChange={(event) =>
-                  setOptions((prev) => ({ ...prev, idVarHint: event.target.value }))
+                  setModelLayoutDraft((prev) => ({ ...prev, name: event.target.value }))
                 }
+                placeholder="e.g., Main OLS"
               />
             </label>
             <label>
-              Time variable hint
+              Outcome variable
               <input
-                value={options.timeVarHint ?? ""}
+                {...textEntryProps}
+                value={modelLayoutDraft.outcomeVar}
                 onChange={(event) =>
-                  setOptions((prev) => ({ ...prev, timeVarHint: event.target.value }))
+                  setModelLayoutDraft((prev) => ({ ...prev, outcomeVar: event.target.value }))
                 }
+                placeholder="y"
+              />
+            </label>
+            <label>
+              Treatment variable(s)
+              <input
+                {...textEntryProps}
+                value={modelLayoutDraft.treatmentVar}
+                onChange={(event) =>
+                  setModelLayoutDraft((prev) => ({ ...prev, treatmentVar: event.target.value }))
+                }
+                placeholder="x1 + x2"
+              />
+            </label>
+            <label>
+              Model family
+              <select
+                value={modelLayoutDraft.modelType}
+                onChange={(event) =>
+                  setModelLayoutDraft((prev) => ({ ...prev, modelType: event.target.value as ModelType }))
+                }
+              >
+                {MODEL_OPTIONS.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Layout
+              <select
+                value={modelLayoutDraft.layout}
+                onChange={(event) =>
+                  setModelLayoutDraft((prev) => ({ ...prev, layout: event.target.value as ModelLayoutKind }))
+                }
+              >
+                {MODEL_LAYOUT_OPTIONS.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {modelLayoutDraft.layout === "interaction" && (
+              <label>
+                Group/interaction variable
+                <input
+                  {...textEntryProps}
+                  value={modelLayoutDraft.interactionVar ?? ""}
+                  onChange={(event) =>
+                    setModelLayoutDraft((prev) => ({ ...prev, interactionVar: event.target.value }))
+                  }
+                  placeholder="moderator_var"
+                />
+              </label>
+            )}
+            {(modelLayoutDraft.modelType === "mixed_effects" ||
+              modelLayoutDraft.modelType === "fixed_effects" ||
+              modelLayoutDraft.modelType === "did" ||
+              modelLayoutDraft.modelType === "event_study") && (
+              <label>
+                ID variable
+                <input
+                  {...textEntryProps}
+                  value={modelLayoutDraft.idVar ?? ""}
+                  onChange={(event) =>
+                    setModelLayoutDraft((prev) => ({ ...prev, idVar: event.target.value }))
+                  }
+                  placeholder="id"
+                />
+              </label>
+            )}
+            {(modelLayoutDraft.modelType === "fixed_effects" ||
+              modelLayoutDraft.modelType === "did" ||
+              modelLayoutDraft.modelType === "event_study") && (
+              <label>
+                Time variable
+                <input
+                  {...textEntryProps}
+                  value={modelLayoutDraft.timeVar ?? ""}
+                  onChange={(event) =>
+                    setModelLayoutDraft((prev) => ({ ...prev, timeVar: event.target.value }))
+                  }
+                  placeholder="time"
+                />
+              </label>
+            )}
+            <label>
+              Covariates (R formula terms)
+              <input
+                {...textEntryProps}
+                value={modelLayoutDraft.covariates ?? ""}
+                onChange={(event) =>
+                  setModelLayoutDraft((prev) => ({ ...prev, covariates: event.target.value }))
+                }
+                placeholder="age + sex + baseline_score"
               />
             </label>
           </div>
-          <label>
-            Group variable hint
+          <p className="muted">
+            Formula preview: <code>{buildDraftFormulaPreview(modelLayoutDraft)}</code>
+          </p>
+          <div className="wizard-grid">
+            {MODEL_FIGURE_OPTIONS.map((item) => (
+              <label key={item.value} className="checkbox compact">
+                <input
+                  type="checkbox"
+                  checked={(modelLayoutDraft.figures ?? []).includes(item.value)}
+                  onChange={() => toggleModelFigure(item.value)}
+                />
+                {item.label}
+              </label>
+            ))}
+          </div>
+          <label className="checkbox">
             <input
-              value={options.groupVarHint ?? ""}
+              type="checkbox"
+              checked={modelLayoutDraft.includeInMainTable}
               onChange={(event) =>
-                setOptions((prev) => ({ ...prev, groupVarHint: event.target.value }))
+                setModelLayoutDraft((prev) => ({ ...prev, includeInMainTable: event.target.checked }))
               }
             />
+            Include this model in main regression table
           </label>
+          <div className="modal-actions">
+            <button
+              type="button"
+              onClick={addModelLayout}
+              disabled={
+                loading ||
+                !(modelLayoutDraft.outcomeVar || "").trim() ||
+                !(modelLayoutDraft.treatmentVar || "").trim()
+              }
+            >
+              Add model
+            </button>
+          </div>
+          {(options.modelLayouts ?? []).length > 0 && (
+            <ul className="selected-data-list">
+              {(options.modelLayouts ?? []).map((item, index) => (
+                <li key={`${item.name}-${index}`} className="selected-data-item">
+                  <span title={item.name}>
+                    {item.name} | {item.modelType} | {item.outcomeVar} ~ {item.layout === "interaction" ? `(${item.treatmentVar}) * ${item.interactionVar || "moderator_var"}` : item.treatmentVar}
+                    {(item.covariates || "").trim() ? ` + ${item.covariates}` : ""}
+                    {" | "}
+                    figures: {item.figures.join(", ") || "none"} | main table: {item.includeInMainTable ? "yes" : "no"}
+                  </span>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() =>
+                      setOptions((prev) => ({
+                        ...prev,
+                        modelLayouts: (prev.modelLayouts ?? []).filter((_, i) => i !== index)
+                      }))
+                    }
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       );
     }
@@ -295,32 +604,7 @@ export function AnalysisTemplateWizard({
     }
 
     if (step === 3) {
-      return (
-        <div className="wizard-step">
-          <div className="wizard-grid">
-            {MODEL_OPTIONS.map((item) => (
-              <label key={item.value} className="checkbox compact">
-                <input
-                  type="checkbox"
-                  checked={options.models.includes(item.value)}
-                  onChange={() => toggleListValue("models", item.value)}
-                />
-                {item.label}
-              </label>
-            ))}
-          </div>
-          {needsPanelHint && (
-            <p className="muted">
-              DiD/Event-study selected. Keep ID/time/treatment hints filled; if blank,
-              scaffold TODOs will be generated.
-            </p>
-          )}
-        </div>
-      );
-    }
-
-    if (step === 4) {
-      const suggested = new Set(suggestDiagnostics(options.models));
+      const suggested = new Set(suggestDiagnostics(selectedModelTypes));
       return (
         <div className="wizard-step">
           <p className="muted">Suggested diagnostics are pre-checked based on model selection.</p>
@@ -341,7 +625,7 @@ export function AnalysisTemplateWizard({
       );
     }
 
-    if (step === 5) {
+    if (step === 4) {
       return (
         <div className="wizard-step">
           <h3>Tables</h3>
@@ -402,11 +686,12 @@ export function AnalysisTemplateWizard({
         <h3>Review</h3>
         <ul className="wizard-review-list">
           <li>Analysis file: {(options.analysisFileName || "analysis").trim() || "analysis"}.Rmd</li>
+          <li>Data sources selected: {options.dataSourcePaths?.length ?? 0}</li>
           <li>Dataset hint: {options.datasetPathHint || "(blank)"}</li>
           <li>Descriptives: {options.descriptives.join(", ") || "none"}</li>
           <li>Plots: {options.plots.join(", ") || "none"}</li>
           <li>Balance checks: {options.balanceChecks.join(", ") || "none"}</li>
-          <li>Models: {options.models.join(", ") || "none"}</li>
+          <li>Model layouts: {(options.modelLayouts ?? []).length}</li>
           <li>Diagnostics: {options.diagnostics.join(", ") || "none"}</li>
           <li>Tables: {options.tables.join(", ") || "none"}</li>
           <li>Robustness: {options.robustness.join(", ") || "none"}</li>

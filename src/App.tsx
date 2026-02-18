@@ -775,6 +775,26 @@ export default function App() {
     }
   };
 
+  const handlePickAnalysisDataSources = async () => {
+    try {
+      const selected = await open({
+        multiple: true,
+        directory: false,
+        title: "Select data files for this analysis"
+      });
+      if (Array.isArray(selected)) {
+        return selected.filter((value): value is string => typeof value === "string");
+      }
+      if (typeof selected === "string") {
+        return [selected];
+      }
+      return [];
+    } catch (err) {
+      setError(String(err));
+      return [];
+    }
+  };
+
   const openAnalysisModal = (projectId: string, studyId: string) => {
     setError(null);
     setAnalysisTarget({ projectId, studyId });
@@ -1374,6 +1394,7 @@ export default function App() {
           projectId={analysisTarget.projectId}
           studyId={analysisTarget.studyId}
           loading={loading}
+          onPickDataSources={handlePickAnalysisDataSources}
           onClose={closeAnalysisModal}
           onSubmit={(options) =>
             handleAddAnalysis(

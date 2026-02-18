@@ -491,8 +491,32 @@ struct AnalysisPackages {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ModelLayout {
+  name: String,
+  model_type: String,
+  outcome_var: String,
+  #[serde(default)]
+  treatment_var: Option<String>,
+  layout: String,
+  #[serde(default)]
+  interaction_var: Option<String>,
+  #[serde(default)]
+  covariates: Option<String>,
+  #[serde(default)]
+  id_var: Option<String>,
+  #[serde(default)]
+  time_var: Option<String>,
+  #[serde(default)]
+  figures: Vec<String>,
+  #[serde(default)]
+  include_in_main_table: bool
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AnalysisTemplateOptions {
   analysis_file_name: Option<String>,
+  data_source_paths: Option<Vec<String>>,
   dataset_path_hint: Option<String>,
   outcome_var_hint: Option<String>,
   treatment_var_hint: Option<String>,
@@ -506,6 +530,8 @@ struct AnalysisTemplateOptions {
   diagnostics: Vec<String>,
   tables: Vec<String>,
   robustness: Vec<String>,
+  #[serde(default)]
+  model_layouts: Vec<ModelLayout>,
   exploratory: bool,
   export_artifacts: bool
 }
@@ -520,6 +546,33 @@ fn selected(values: &[String], key: &str) -> bool {
   values.iter().any(|value| value == key)
 }
 
+fn collect_model_types(options: &AnalysisTemplateOptions) -> Vec<String> {
+  let mut out = options.models.clone();
+  for layout in &options.model_layouts {
+    if !layout.model_type.trim().is_empty() && !out.iter().any(|m| m == &layout.model_type) {
+      out.push(layout.model_type.clone());
+    }
+  }
+  out
+}
+
+fn selected_model(options: &AnalysisTemplateOptions, key: &str) -> bool {
+  collect_model_types(options).iter().any(|value| value == key)
+}
+
+fn safe_token(value: &str, fallback: &str) -> String {
+  let mut out = String::new();
+  for c in value.chars() {
+    if c.is_ascii_alphanumeric() || c == '_' {
+      out.push(c);
+    } else {
+      out.push('_');
+    }
+  }
+  let out = out.trim_matches('_').to_string();
+  if out.is_empty() { fallback.to_string() } else { out }
+}
+
 fn hint_or_default(value: &Option<String>, fallback: &str) -> String {
   value
     .as_ref()
@@ -527,6 +580,31 @@ fn hint_or_default(value: &Option<String>, fallback: &str) -> String {
     .filter(|item| !item.is_empty())
     .unwrap_or(fallback)
     .to_string()
+}
+
+fn analysis_output_here_expr(project_root: &Path, study_root: &Path) -> String {
+  let output_root = study_root.join("07_outputs");
+  if let Some(rel) = diff_paths(&output_root, project_root) {
+    let parts: Vec<String> = rel
+      .components()
+      .map(|component| component.as_os_str().to_string_lossy().replace('"', "\\\""))
+      .collect();
+    if !parts.is_empty() {
+      return format!(
+        "here::here({})",
+        parts
+          .iter()
+          .map(|item| format!("\"{item}\""))
+          .collect::<Vec<String>>()
+          .join(", ")
+      );
+    }
+  }
+  let absolute = output_root
+    .to_string_lossy()
+    .replace('\\', "/")
+    .replace('"', "\\\"");
+  format!("\"{absolute}\"")
 }
 
 fn normalized_analysis_file_base(value: &Option<String>) -> Result<String, String> {
@@ -642,44 +720,44 @@ fn render_packages(options: &AnalysisTemplateOptions) -> String {
   if selected(&options.plots, "correlation_heatmap") {
     add_package(&mut packages, "reshape2");
   }
-  if selected(&options.models, "ols")
+  if selected_model(options, "ols")
     || selected(&options.diagnostics, "linearity")
     || selected(&options.diagnostics, "multicollinearity")
   {
     add_package(&mut packages, "car");
   }
-  if selected(&options.models, "ols") || selected(&options.diagnostics, "homoskedasticity") {
+  if selected_model(options, "ols") || selected(&options.diagnostics, "homoskedasticity") {
     add_package(&mut packages, "lmtest");
     add_package(&mut packages, "sandwich");
     add_package(&mut packages, "performance");
   }
-  if selected(&options.models, "logit")
-    || selected(&options.models, "poisson")
-    || selected(&options.models, "negbin")
+  if selected_model(options, "logit")
+    || selected_model(options, "poisson")
+    || selected_model(options, "negbin")
     || selected(&options.diagnostics, "overdispersion")
   {
     add_package(&mut packages, "performance");
     add_package(&mut packages, "pscl");
   }
-  if selected(&options.models, "negbin") {
+  if selected_model(options, "negbin") {
     add_package(&mut packages, "MASS");
   }
-  if selected(&options.models, "mixed_effects") {
+  if selected_model(options, "mixed_effects") {
     add_package(&mut packages, "lme4");
     add_package(&mut packages, "broom.mixed");
   }
-  if selected(&options.models, "fixed_effects")
-    || selected(&options.models, "did")
-    || selected(&options.models, "event_study")
+  if selected_model(options, "fixed_effects")
+    || selected_model(options, "did")
+    || selected_model(options, "event_study")
     || selected(&options.diagnostics, "parallel_trends")
   {
     add_package(&mut packages, "fixest");
   }
-  if selected(&options.models, "survival") {
+  if selected_model(options, "survival") {
     add_package(&mut packages, "survival");
     add_package(&mut packages, "survminer");
   }
-  if selected(&options.models, "rd") || selected(&options.diagnostics, "bandwidth_sensitivity") {
+  if selected_model(options, "rd") || selected(&options.diagnostics, "bandwidth_sensitivity") {
     add_package(&mut packages, "rdrobust");
   }
 
@@ -712,15 +790,11 @@ fn render_descriptives(options: &AnalysisTemplateOptions, outcome: &str, group: 
 
   if selected(&options.descriptives, "summary_stats") {
     out.push_str("```{r descriptives_summary_stats}\n");
-    out.push_str("summary_stats <- df %>%\n");
-    out.push_str("  summarise(across(where(is.numeric), list(\n");
-    out.push_str("    mean = ~mean(.x, na.rm = TRUE),\n");
-    out.push_str("    sd = ~sd(.x, na.rm = TRUE),\n");
-    out.push_str("    median = ~median(.x, na.rm = TRUE),\n");
-    out.push_str("    p25 = ~quantile(.x, 0.25, na.rm = TRUE),\n");
-    out.push_str("    p75 = ~quantile(.x, 0.75, na.rm = TRUE)\n");
-    out.push_str("  )))\n");
-    out.push_str("summary_stats\n");
+    out.push_str("summary_stats_ft <- ft_apa_descriptives(\n");
+    out.push_str("  df,\n");
+    out.push_str("  digits = 2\n");
+    out.push_str(")\n");
+    out.push_str("summary_stats_ft\n");
     out.push_str("```\n\n");
   }
   if selected(&options.descriptives, "counts") {
@@ -728,8 +802,12 @@ fn render_descriptives(options: &AnalysisTemplateOptions, outcome: &str, group: 
     out.push_str("n_obs <- nrow(df)\n");
     out.push_str(&format!("n_ids <- dplyr::n_distinct(df${group})\n"));
     out.push_str(&format!("counts_by_group <- df %>% count({group})\n"));
-    out.push_str("list(n_obs = n_obs, n_ids = n_ids)\n");
-    out.push_str("counts_by_group\n");
+    out.push_str("counts_tbl <- tibble::tibble(\n");
+    out.push_str("  Metric = c(\"N observations\", \"N IDs\"),\n");
+    out.push_str("  Value = c(n_obs, n_ids)\n");
+    out.push_str(")\n");
+    out.push_str("ft_apa(counts_tbl)\n");
+    out.push_str("ft_apa(counts_by_group)\n");
     out.push_str("```\n\n");
   }
   if selected(&options.descriptives, "missingness") {
@@ -742,7 +820,7 @@ fn render_descriptives(options: &AnalysisTemplateOptions, outcome: &str, group: 
     out.push_str("```{r descriptives_group_summary}\n");
     out.push_str(&format!("group_summary <- df %>% group_by({group}) %>%\n"));
     out.push_str("  summarise(across(where(is.numeric), ~mean(.x, na.rm = TRUE)), .groups = \"drop\")\n");
-    out.push_str("group_summary\n");
+    out.push_str("ft_apa(group_summary)\n");
     out.push_str("```\n\n");
   }
   if selected(&options.descriptives, "correlations") {
@@ -754,15 +832,13 @@ fn render_descriptives(options: &AnalysisTemplateOptions, outcome: &str, group: 
 
   if selected(&options.plots, "histogram") {
     out.push_str("```{r descriptives_plot_histogram}\n");
-    out.push_str(&format!("p_hist <- ggplot(df, aes(x = {outcome})) + geom_histogram(bins = 30)\n"));
+    out.push_str(&format!("p_hist <- apa_hist(df, {outcome}, bins = 30)\n"));
     out.push_str("p_hist\n");
     out.push_str("```\n\n");
   }
   if selected(&options.plots, "boxplot") {
     out.push_str("```{r descriptives_plot_boxplot}\n");
-    out.push_str(&format!(
-      "p_box <- ggplot(df, aes(x = {group}, y = {outcome})) + geom_boxplot()\n"
-    ));
+    out.push_str(&format!("p_box <- apa_box(df, {group}, {outcome})\n"));
     out.push_str("p_box\n");
     out.push_str("```\n\n");
   }
@@ -775,9 +851,7 @@ fn render_descriptives(options: &AnalysisTemplateOptions, outcome: &str, group: 
   if selected(&options.plots, "scatter") {
     out.push_str("```{r descriptives_plot_scatter}\n");
     out.push_str("# TODO: replace x_var with a meaningful predictor\n");
-    out.push_str(&format!(
-      "p_scatter <- ggplot(df, aes(x = x_var, y = {outcome})) + geom_point() + geom_smooth(method = \"lm\")\n"
-    ));
+    out.push_str(&format!("p_scatter <- apa_scatter(df, x_var, {outcome}, add_lm = TRUE)\n"));
     out.push_str("p_scatter\n");
     out.push_str("```\n\n");
   }
@@ -836,101 +910,299 @@ fn render_balance_checks(options: &AnalysisTemplateOptions, treatment: &str) -> 
 }
 
 fn render_models(options: &AnalysisTemplateOptions, outcome: &str, treatment: &str, id: &str, time: &str) -> String {
+  #[derive(Clone)]
+  struct ModelPlan {
+    name: String,
+    model_type: String,
+    outcome_var: String,
+    treatment_var: String,
+    layout: String,
+    interaction_var: String,
+    covariates: String,
+    id_var: String,
+    time_var: String,
+    figures: Vec<String>,
+    include_in_main_table: bool
+  }
+
   let mut out = String::new();
   out.push_str("# Main Analyses\n\n");
 
-  if options.models.is_empty() {
+  let mut plans: Vec<ModelPlan> = Vec::new();
+  if !options.model_layouts.is_empty() {
+    for (idx, layout) in options.model_layouts.iter().enumerate() {
+      let outcome_var = layout.outcome_var.trim();
+      if outcome_var.is_empty() {
+        continue;
+      }
+      let model_type = layout.model_type.trim().to_string();
+      if model_type.is_empty() {
+        continue;
+      }
+      let name = if layout.name.trim().is_empty() {
+        format!("model_{}", idx + 1)
+      } else {
+        layout.name.trim().to_string()
+      };
+      plans.push(ModelPlan {
+        name,
+        model_type,
+        outcome_var: outcome_var.to_string(),
+        treatment_var: layout
+          .treatment_var
+          .as_ref()
+          .map(|v| v.trim().to_string())
+          .filter(|v| !v.is_empty())
+          .unwrap_or_else(|| treatment.to_string()),
+        layout: layout.layout.trim().to_string(),
+        interaction_var: layout.interaction_var.clone().unwrap_or_default(),
+        covariates: layout.covariates.clone().unwrap_or_default(),
+        id_var: layout
+          .id_var
+          .as_ref()
+          .map(|v| v.trim().to_string())
+          .filter(|v| !v.is_empty())
+          .unwrap_or_else(|| id.to_string()),
+        time_var: layout
+          .time_var
+          .as_ref()
+          .map(|v| v.trim().to_string())
+          .filter(|v| !v.is_empty())
+          .unwrap_or_else(|| time.to_string()),
+        figures: layout.figures.clone(),
+        include_in_main_table: layout.include_in_main_table
+      });
+    }
+  } else {
+    for model_type in &options.models {
+      plans.push(ModelPlan {
+        name: model_type.to_uppercase(),
+        model_type: model_type.clone(),
+        outcome_var: outcome.to_string(),
+        treatment_var: treatment.to_string(),
+        layout: "simple".to_string(),
+        interaction_var: String::new(),
+        covariates: "covariate1 + covariate2".to_string(),
+        id_var: id.to_string(),
+        time_var: time.to_string(),
+        figures: vec!["coef_plot".to_string()],
+        include_in_main_table: true
+      });
+    }
+  }
+
+  if plans.is_empty() {
     out.push_str("```{r model_none}\n");
     out.push_str("# TODO: Select model scaffolding in the wizard or add models manually.\n");
     out.push_str("```\n\n");
     return out;
   }
 
-  if selected(&options.models, "ols") {
-    out.push_str("## OLS\n\n```{r model_ols}\n");
-    out.push_str(&format!("m_ols <- lm({outcome} ~ {treatment} + covariate1 + covariate2, data = df)\n"));
-    out.push_str("modelsummary::modelsummary(list(OLS = m_ols))\n");
-    out.push_str("```\n\n");
-  }
-  if selected(&options.models, "logit") {
-    out.push_str("## Logistic\n\n```{r model_logit}\n");
-    out.push_str(&format!("m_logit <- glm({outcome} ~ {treatment} + covariates, data = df, family = binomial())\n"));
-    out.push_str("modelsummary::modelsummary(list(Logit = m_logit))\n");
-    out.push_str("```\n\n");
-  }
-  if selected(&options.models, "poisson") {
-    out.push_str("## Poisson\n\n```{r model_poisson}\n");
+  out.push_str("```{r model_registry_init}\n");
+  out.push_str("model_registry <- list()\n");
+  out.push_str("model_metadata <- tibble::tibble(\n");
+  out.push_str("  model_name = character(),\n");
+  out.push_str("  model_object = character(),\n");
+  out.push_str("  outcome = character(),\n");
+  out.push_str("  include_main_table = logical(),\n");
+  out.push_str("  main_figure = character()\n");
+  out.push_str(")\n");
+  out.push_str("```\n\n");
+
+  use std::collections::BTreeMap;
+  let mut by_outcome: BTreeMap<String, Vec<(String, String, bool, String)>> = BTreeMap::new();
+  for (idx, plan) in plans.iter().enumerate() {
+    let model_object = format!("m_{}", idx + 1);
+    let chunk_id = safe_token(
+      &format!("model_{}_{}", idx + 1, plan.name.to_lowercase()),
+      &format!("model_{}", idx + 1)
+    );
+    let outcome_var = plan.outcome_var.replace('"', "\\\"");
+    let covariates = plan.covariates.trim();
+    let interaction_var = if plan.interaction_var.trim().is_empty() {
+      "moderator_var".to_string()
+    } else {
+      plan.interaction_var.trim().to_string()
+    };
+    let treatment_expr = plan.treatment_var.trim();
+    let mut rhs = if plan.layout == "interaction" {
+      format!("({}) * {}", treatment_expr, interaction_var)
+    } else {
+      treatment_expr.to_string()
+    };
+    if !covariates.is_empty() {
+      rhs.push_str(" + ");
+      rhs.push_str(covariates);
+    }
+
     out.push_str(&format!(
-      "m_poisson <- glm({outcome} ~ {treatment} + covariates, data = df, family = poisson())\n"
+      "## {} ({})\n\n```{{r {}}}\n",
+      plan.name.replace('"', "\\\""),
+      plan.model_type,
+      chunk_id
     ));
-    out.push_str("modelsummary::modelsummary(list(Poisson = m_poisson))\n");
-    out.push_str("```\n\n");
-  }
-  if selected(&options.models, "negbin") {
-    out.push_str("## Negative Binomial\n\n```{r model_negbin}\n");
-    out.push_str(&format!("m_negbin <- MASS::glm.nb({outcome} ~ {treatment} + covariates, data = df)\n"));
-    out.push_str("modelsummary::modelsummary(list(NegBin = m_negbin))\n");
-    out.push_str("```\n\n");
-  }
-  if selected(&options.models, "mixed_effects") {
-    out.push_str("## Mixed Effects\n\n```{r model_mixed}\n");
-    out.push_str(&format!("m_mixed <- lme4::lmer({outcome} ~ {treatment} + covariates + (1|{id}), data = df)\n"));
-    out.push_str("modelsummary::modelsummary(list(Mixed = m_mixed))\n");
-    out.push_str("```\n\n");
-  }
-  if selected(&options.models, "fixed_effects") {
-    out.push_str("## Fixed Effects\n\n```{r model_fixed_effects}\n");
+    match plan.model_type.as_str() {
+      "ols" => out.push_str(&format!("{} <- lm({} ~ {}, data = df)\n", model_object, outcome_var, rhs)),
+      "logit" => out.push_str(&format!(
+        "{} <- glm({} ~ {}, data = df, family = binomial())\n",
+        model_object, outcome_var, rhs
+      )),
+      "poisson" => out.push_str(&format!(
+        "{} <- glm({} ~ {}, data = df, family = poisson())\n",
+        model_object, outcome_var, rhs
+      )),
+      "negbin" => out.push_str(&format!(
+        "{} <- MASS::glm.nb({} ~ {}, data = df)\n",
+        model_object, outcome_var, rhs
+      )),
+      "mixed_effects" => out.push_str(&format!(
+        "{} <- lme4::lmer({} ~ {} + (1|{}), data = df)\n",
+        model_object, outcome_var, rhs, plan.id_var
+      )),
+      "fixed_effects" => out.push_str(&format!(
+        "{} <- fixest::feols({} ~ {} | {} + {}, data = df, vcov = \"cluster\")\n",
+        model_object, outcome_var, rhs, plan.id_var, plan.time_var
+      )),
+      "survival" => out.push_str(&format!(
+        "{} <- survival::coxph(Surv(time_to_event, event) ~ {}, data = df)\n",
+        model_object, rhs
+      )),
+      "rd" => {
+        out.push_str("# TODO: replace running_var and cutoff.\n");
+        out.push_str(&format!(
+          "{} <- rdrobust::rdrobust(y = df${}, x = df$running_var, c = 0)\n",
+          model_object, outcome_var
+        ));
+      }
+      "did" => out.push_str(&format!(
+        "{} <- fixest::feols({} ~ i({}, {}, ref = 0){} | {} + {}, data = df)\n",
+        model_object,
+        outcome_var,
+        plan.time_var,
+        plan.treatment_var,
+        if covariates.is_empty() { "".to_string() } else { format!(" + {covariates}") },
+        plan.id_var,
+        plan.time_var
+      )),
+      "event_study" => {
+        out.push_str(&format!(
+          "{} <- fixest::feols({} ~ sunab(cohort_time, {}) | {} + {}, data = df)\n",
+          model_object, outcome_var, plan.time_var, plan.id_var, plan.time_var
+        ));
+        out.push_str("# TODO: define cohort_time for adoption timing.\n");
+      }
+      _ => out.push_str(&format!(
+        "{} <- lm({} ~ {}, data = df)\n",
+        model_object, outcome_var, rhs
+      ))
+    }
+    out.push_str(&format!("model_registry[[\"{}\"]] <- {}\n", plan.name.replace('"', "\\\""), model_object));
+    let figure_pref = plan
+      .figures
+      .first()
+      .cloned()
+      .unwrap_or_else(|| "coef_plot".to_string());
+    out.push_str("model_metadata <- dplyr::bind_rows(\n");
+    out.push_str("  model_metadata,\n");
     out.push_str(&format!(
-      "m_fe <- fixest::feols({outcome} ~ {treatment} + covariates | {id} + {time}, data = df, vcov = \"cluster\")\n"
+      "  tibble::tibble(model_name = \"{}\", model_object = \"{}\", outcome = \"{}\", include_main_table = {}, main_figure = \"{}\")\n",
+      plan.name.replace('"', "\\\""),
+      model_object,
+      outcome_var,
+      if plan.include_in_main_table { "TRUE" } else { "FALSE" },
+      figure_pref
     ));
-    out.push_str("# TODO: specify cluster variable(s) in vcov.\n");
-    out.push_str("modelsummary::modelsummary(list(FE = m_fe))\n");
+    out.push_str(")\n");
+    out.push_str("if (inherits(model_registry[[");
+    out.push_str(&format!("\"{}\"", plan.name.replace('"', "\\\"")));
+    out.push_str("]], c(\"lm\", \"glm\", \"fixest\", \"lmerMod\", \"coxph\"))) {\n");
+    out.push_str("  print(broom::glance(model_registry[[");
+    out.push_str(&format!("\"{}\"", plan.name.replace('"', "\\\"")));
+    out.push_str("]]))\n");
+    out.push_str("}\n");
     out.push_str("```\n\n");
+
+    by_outcome
+      .entry(plan.outcome_var.clone())
+      .or_default()
+      .push((
+        plan.name.clone(),
+        model_object.clone(),
+        plan.include_in_main_table,
+        figure_pref
+      ));
   }
-  if selected(&options.models, "survival") {
-    out.push_str("## Survival\n\n```{r model_survival}\n");
-    out.push_str(&format!(
-      "m_surv <- survival::coxph(Surv(time_to_event, event) ~ {treatment} + covariates, data = df)\n"
-    ));
-    out.push_str("modelsummary::modelsummary(list(Cox = m_surv))\n");
-    out.push_str("```\n\n");
+
+  if selected(&options.tables, "model_table") {
+    out.push_str("## Main Regression Tables (Grouped by Outcome)\n\n");
+    for (outcome_name, models) in &by_outcome {
+      let included: Vec<(String, String)> = models
+        .iter()
+        .filter(|(_, _, include, _)| *include)
+        .map(|(name, object, _, _)| (name.clone(), object.clone()))
+        .collect();
+      if included.is_empty() {
+        continue;
+      }
+      let file_outcome = safe_token(outcome_name, "outcome");
+      out.push_str(&format!("```{{r model_table_{}}}\n", file_outcome));
+      out.push_str("models_for_outcome <- list(\n");
+      for (idx, (name, object)) in included.iter().enumerate() {
+        let suffix = if idx + 1 == included.len() { "" } else { "," };
+        out.push_str(&format!("  \"{}\" = {}{}\n", name.replace('"', "\\\""), object, suffix));
+      }
+      out.push_str(")\n");
+      out.push_str("modelsummary::modelsummary(models_for_outcome)\n");
+      out.push_str(&format!(
+        "modelsummary::modelsummary(models_for_outcome, output = file.path(tables_dir, \"models_{}.html\"))\n",
+        file_outcome
+      ));
+      out.push_str("```\n\n");
+    }
   }
-  if selected(&options.models, "rd") {
-    out.push_str("## Regression Discontinuity\n\n```{r model_rd}\n");
-    out.push_str("# TODO: replace running_var and cutoff.\n");
-    out.push_str(&format!("m_rd <- rdrobust::rdrobust(y = df${outcome}, x = df$running_var, c = 0)\n"));
-    out.push_str("m_rd\n");
-    out.push_str("```\n\n");
-  }
-  if selected(&options.models, "did") {
-    out.push_str("## Difference-in-Differences\n\n```{r model_did}\n");
-    out.push_str(&format!(
-      "m_did <- fixest::feols({outcome} ~ i({time}, {treatment}, ref = 0) | {id} + {time}, data = df)\n"
-    ));
-    out.push_str("# TODO: verify treatment timing and reference period.\n");
-    out.push_str("modelsummary::modelsummary(list(DiD = m_did))\n");
-    out.push_str("```\n\n");
-  }
-  if selected(&options.models, "event_study") {
-    out.push_str("## Event Study\n\n```{r model_event_study}\n");
-    out.push_str(&format!(
-      "m_event <- fixest::feols({outcome} ~ sunab(cohort_time, {time}) | {id} + {time}, data = df)\n"
-    ));
-    out.push_str("# TODO: define cohort_time for adoption timing.\n");
-    out.push_str("fixest::iplot(m_event)\n");
-    out.push_str("```\n\n");
-  }
-  if selected(&options.plots, "coef_plot") {
-    out.push_str("```{r model_coef_plot}\n");
-    out.push_str("# TODO: choose a model object to visualize coefficients.\n");
-    out.push_str("coef_df <- broom::tidy(m_ols)\n");
-    out.push_str("p_coef <- ggplot(coef_df, aes(x = estimate, y = term)) + geom_point()\n");
-    out.push_str("p_coef\n");
-    out.push_str("```\n\n");
-  }
-  if selected(&options.plots, "event_study_plot") {
-    out.push_str("```{r model_event_study_plot}\n");
-    out.push_str("# TODO: use fixest::iplot(m_event) if event-study model is estimated.\n");
+
+  out.push_str("## Main Figures by Outcome\n\n");
+  for (outcome_name, models) in &by_outcome {
+    if models.is_empty() {
+      continue;
+    }
+    let (_, first_obj, _, figure_pref) = &models[0];
+    let chunk = safe_token(&format!("main_figure_{}", outcome_name), "main_figure");
+    let clean_outcome = safe_token(outcome_name, "outcome");
+    out.push_str(&format!("```{{r {}}}\n", chunk));
+    out.push_str(&format!("main_model <- {}\n", first_obj));
+    match figure_pref.as_str() {
+      "fitted_plot" => {
+        out.push_str("if (inherits(main_model, c(\"lm\", \"glm\"))) {\n");
+        out.push_str(&format!("  p_main_{} <- ggplot(df, aes(x = fitted(main_model), y = {})) +\n", clean_outcome, outcome_name));
+        out.push_str("    geom_point(alpha = 0.7) +\n");
+        out.push_str("    geom_abline(slope = 1, intercept = 0, linetype = \"dashed\") +\n");
+        out.push_str("    labs(x = \"Fitted\", y = \"Observed\") +\n");
+        out.push_str("    theme_apa()\n");
+        out.push_str(&format!("  p_main_{}\n", clean_outcome));
+        out.push_str("}\n");
+      }
+      "residual_plot" => {
+        out.push_str("if (inherits(main_model, c(\"lm\", \"glm\"))) {\n");
+        out.push_str("  plot(main_model, which = 1)\n");
+        out.push_str("}\n");
+      }
+      "event_study_plot" => {
+        out.push_str("if (inherits(main_model, \"fixest\")) {\n");
+        out.push_str("  fixest::iplot(main_model)\n");
+        out.push_str("}\n");
+      }
+      _ => {
+        out.push_str("if (inherits(main_model, c(\"lm\", \"glm\", \"fixest\", \"lmerMod\", \"coxph\"))) {\n");
+        out.push_str("  coef_df <- broom::tidy(main_model)\n");
+        out.push_str(&format!("  p_main_{} <- ggplot(coef_df, aes(x = estimate, y = term)) +\n", clean_outcome));
+        out.push_str("    geom_point() +\n");
+        out.push_str("    geom_errorbarh(aes(xmin = estimate - 1.96 * std.error, xmax = estimate + 1.96 * std.error), height = 0.1) +\n");
+        out.push_str("    theme_apa()\n");
+        out.push_str(&format!("  p_main_{}\n", clean_outcome));
+        out.push_str("}\n");
+      }
+    }
     out.push_str("```\n\n");
   }
 
@@ -943,39 +1215,78 @@ fn render_diagnostics(options: &AnalysisTemplateOptions) -> String {
   }
   let mut out = String::new();
   out.push_str("# Diagnostics and Assumption Checks\n\n");
+  out.push_str("```{r diagnostics_registry_guard}\n");
+  out.push_str("if (!exists(\"model_registry\")) model_registry <- list()\n");
+  out.push_str("```\n\n");
 
   if selected(&options.diagnostics, "linearity") {
     out.push_str("```{r diag_linearity}\n");
-    out.push_str("plot(m_ols, which = 1)\n");
-    out.push_str("car::crPlots(m_ols)\n");
+    out.push_str("for (nm in names(model_registry)) {\n");
+    out.push_str("  m <- model_registry[[nm]]\n");
+    out.push_str("  if (inherits(m, \"lm\")) {\n");
+    out.push_str("    message(\"Linearity diagnostics: \", nm)\n");
+    out.push_str("    plot(m, which = 1)\n");
+    out.push_str("    car::crPlots(m)\n");
+    out.push_str("  }\n");
+    out.push_str("}\n");
     out.push_str("```\n\n");
   }
   if selected(&options.diagnostics, "normality_residuals") {
     out.push_str("```{r diag_normality}\n");
-    out.push_str("plot(m_ols, which = 2)\n");
+    out.push_str("for (nm in names(model_registry)) {\n");
+    out.push_str("  m <- model_registry[[nm]]\n");
+    out.push_str("  if (inherits(m, \"lm\")) {\n");
+    out.push_str("    message(\"Normality diagnostics: \", nm)\n");
+    out.push_str("    plot(m, which = 2)\n");
+    out.push_str("  }\n");
+    out.push_str("}\n");
     out.push_str("# TODO: Shapiro tests can be misleading at large N.\n");
     out.push_str("```\n\n");
   }
   if selected(&options.diagnostics, "homoskedasticity") {
     out.push_str("```{r diag_homoskedasticity}\n");
-    out.push_str("lmtest::bptest(m_ols)\n");
-    out.push_str("lmtest::coeftest(m_ols, vcov = sandwich::vcovHC(m_ols, type = \"HC1\"))\n");
+    out.push_str("for (nm in names(model_registry)) {\n");
+    out.push_str("  m <- model_registry[[nm]]\n");
+    out.push_str("  if (inherits(m, \"lm\")) {\n");
+    out.push_str("    message(\"Homoskedasticity diagnostics: \", nm)\n");
+    out.push_str("    print(lmtest::bptest(m))\n");
+    out.push_str("    print(lmtest::coeftest(m, vcov = sandwich::vcovHC(m, type = \"HC1\")))\n");
+    out.push_str("  }\n");
+    out.push_str("}\n");
     out.push_str("```\n\n");
   }
   if selected(&options.diagnostics, "multicollinearity") {
     out.push_str("```{r diag_multicollinearity}\n");
-    out.push_str("car::vif(m_ols)\n");
+    out.push_str("for (nm in names(model_registry)) {\n");
+    out.push_str("  m <- model_registry[[nm]]\n");
+    out.push_str("  if (inherits(m, \"lm\")) {\n");
+    out.push_str("    message(\"VIF: \", nm)\n");
+    out.push_str("    print(car::vif(m))\n");
+    out.push_str("  }\n");
+    out.push_str("}\n");
     out.push_str("```\n\n");
   }
   if selected(&options.diagnostics, "influential_points") {
     out.push_str("```{r diag_influential_points}\n");
-    out.push_str("plot(m_ols, which = 4)\n");
-    out.push_str("plot(m_ols, which = 5)\n");
+    out.push_str("for (nm in names(model_registry)) {\n");
+    out.push_str("  m <- model_registry[[nm]]\n");
+    out.push_str("  if (inherits(m, \"lm\")) {\n");
+    out.push_str("    message(\"Influence diagnostics: \", nm)\n");
+    out.push_str("    plot(m, which = 4)\n");
+    out.push_str("    plot(m, which = 5)\n");
+    out.push_str("  }\n");
+    out.push_str("}\n");
     out.push_str("```\n\n");
   }
   if selected(&options.diagnostics, "overdispersion") {
     out.push_str("```{r diag_overdispersion}\n");
-    out.push_str("performance::check_overdispersion(m_poisson)\n");
+    out.push_str("for (nm in names(model_registry)) {\n");
+    out.push_str("  m <- model_registry[[nm]]\n");
+    out.push_str("  if (inherits(m, \"glm\") && identical(stats::family(m)$family, \"poisson\")) {\n");
+    out.push_str("    message(\"Overdispersion check: \", nm)\n");
+    out.push_str("    print(performance::check_overdispersion(m))\n");
+    out.push_str("  }\n");
+    out.push_str("}\n");
     out.push_str("```\n\n");
   }
   if selected(&options.diagnostics, "parallel_trends") {
@@ -1013,11 +1324,21 @@ fn render_robustness(options: &AnalysisTemplateOptions) -> String {
     out.push_str(&format!("```{{r robustness_{check}}}\n"));
     match check.as_str() {
       "hc_se" => {
-        out.push_str("lmtest::coeftest(m_ols, vcov = sandwich::vcovHC(m_ols, type = \"HC1\"))\n");
+        out.push_str("for (nm in names(model_registry)) {\n");
+        out.push_str("  m <- model_registry[[nm]]\n");
+        out.push_str("  if (inherits(m, \"lm\")) {\n");
+        out.push_str("    print(lmtest::coeftest(m, vcov = sandwich::vcovHC(m, type = \"HC1\")))\n");
+        out.push_str("  }\n");
+        out.push_str("}\n");
       }
       "cluster_se" => {
         out.push_str("# TODO: set cluster variable(s).\n");
-        out.push_str("fixest::etable(m_fe, vcov = ~cluster_id)\n");
+        out.push_str("for (nm in names(model_registry)) {\n");
+        out.push_str("  m <- model_registry[[nm]]\n");
+        out.push_str("  if (inherits(m, \"fixest\")) {\n");
+        out.push_str("    print(fixest::etable(m, vcov = ~cluster_id))\n");
+        out.push_str("  }\n");
+        out.push_str("}\n");
       }
       "winsorize" => {
         out.push_str("# TODO: winsorize selected variables at chosen cut points.\n");
@@ -1060,12 +1381,13 @@ fn render_exports(options: &AnalysisTemplateOptions) -> String {
   out.push_str("dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)\n");
   out.push_str("dir.create(reports_dir, recursive = TRUE, showWarnings = FALSE)\n");
   if selected(&options.tables, "model_table") {
-    out.push_str("# TODO: replace model objects with your fitted models.\n");
-    out.push_str("modelsummary::modelsummary(list(m1 = m_ols), output = file.path(tables_dir, \"models.html\"))\n");
+    out.push_str("# Model tables are exported in Main Analyses, grouped by outcome.\n");
   }
   if selected(&options.tables, "table1_descriptives") {
     out.push_str("# TODO: export descriptives table.\n");
-    out.push_str("readr::write_csv(summary_stats, file.path(tables_dir, \"table1_descriptives.csv\"))\n");
+    out.push_str("if (exists(\"summary_stats_ft\")) {\n");
+    out.push_str("  flextable::save_as_docx(summary_stats_ft, path = file.path(tables_dir, \"table1_descriptives.docx\"))\n");
+    out.push_str("}\n");
   }
   if selected(&options.tables, "balance_table") {
     out.push_str("# TODO: export balance table object.\n");
@@ -1076,8 +1398,17 @@ fn render_exports(options: &AnalysisTemplateOptions) -> String {
   if selected(&options.plots, "histogram") {
     out.push_str("ggsave(file.path(figures_dir, \"hist_outcome.png\"), plot = p_hist, width = 7, height = 5, dpi = 300)\n");
   }
+  out.push_str("if (exists(\"model_metadata\")) {\n");
+  out.push_str("  outcomes <- unique(model_metadata$outcome)\n");
+  out.push_str("  for (oc in outcomes) {\n");
+  out.push_str("    obj <- get0(paste0(\"p_main_\", gsub(\"[^A-Za-z0-9_]+\", \"_\", oc)), ifnotfound = NULL)\n");
+  out.push_str("    if (!is.null(obj)) {\n");
+  out.push_str("      ggsave(file.path(figures_dir, paste0(\"main_figure_\", gsub(\"[^A-Za-z0-9_]+\", \"_\", oc), \".png\")), plot = obj, width = 7, height = 5, dpi = 300)\n");
+  out.push_str("    }\n");
+  out.push_str("  }\n");
+  out.push_str("}\n");
   if selected(&options.plots, "coef_plot") {
-    out.push_str("ggsave(file.path(figures_dir, \"coef_plot.png\"), plot = p_coef, width = 7, height = 5, dpi = 300)\n");
+    out.push_str("# Coefficient-style figures are generated per outcome in Main Analyses.\n");
   }
   out.push_str("# TODO: save knitted reports (html/pdf/docx) to reports_dir when rendering.\n");
   out.push_str("```\n\n");
@@ -1085,11 +1416,25 @@ fn render_exports(options: &AnalysisTemplateOptions) -> String {
 }
 
 fn render_analysis_rmd(
+  project_root: &Path,
+  study_root: &Path,
   study_id: &str,
   study_title: &str,
   options: &AnalysisTemplateOptions
 ) -> String {
   let dataset_path = hint_or_default(&options.dataset_path_hint, "data/clean/analysis.csv");
+  let data_sources: Vec<String> = options
+    .data_source_paths
+    .as_ref()
+    .map(|values| {
+      values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.replace('\\', "/"))
+        .collect::<Vec<String>>()
+    })
+    .unwrap_or_default();
   let outcome = hint_or_default(&options.outcome_var_hint, "y");
   let treatment = hint_or_default(&options.treatment_var_hint, "treat");
   let id = hint_or_default(&options.id_var_hint, "id");
@@ -1133,7 +1478,10 @@ fn render_analysis_rmd(
   out.push_str("source(here::here(\"R/style/tables_flextable.R\"))\n");
   out.push_str("source(here::here(\"R/style/style_init.R\"))\n\n");
   out.push_str("cfg <- init_project_style()\n\n");
-  out.push_str("output_dir <- \"../07_outputs\"\n");
+  out.push_str(&format!(
+    "output_dir <- {}\n",
+    analysis_output_here_expr(project_root, study_root)
+  ));
   out.push_str("tables_dir <- file.path(output_dir, \"tables\")\n");
   out.push_str("figures_dir <- file.path(output_dir, \"figures\")\n");
   out.push_str("reports_dir <- file.path(output_dir, \"reports\")\n");
@@ -1146,7 +1494,31 @@ fn render_analysis_rmd(
 
   out.push_str("# Data Import and Cleaning\n\n");
   out.push_str("```{r load_data}\n");
-  out.push_str(&format!("raw <- readr::read_csv(\"{}\")\n", dataset_path.replace('"', "\\\"")));
+  if data_sources.is_empty() {
+    out.push_str(&format!("raw <- readr::read_csv(\"{}\")\n", dataset_path.replace('"', "\\\"")));
+  } else {
+    out.push_str("read_data_source <- function(path) {\n");
+    out.push_str("  ext <- tolower(tools::file_ext(path))\n");
+    out.push_str("  if (ext %in% c(\"csv\")) return(readr::read_csv(path, show_col_types = FALSE))\n");
+    out.push_str("  if (ext %in% c(\"tsv\", \"txt\")) return(readr::read_tsv(path, show_col_types = FALSE))\n");
+    out.push_str("  if (ext %in% c(\"rds\")) return(readr::read_rds(path))\n");
+    out.push_str("  stop(paste(\"Unsupported data source extension for:\", path))\n");
+    out.push_str("}\n");
+    out.push_str("data_sources <- c(\n");
+    for (index, source) in data_sources.iter().enumerate() {
+      let sep = if index + 1 == data_sources.len() { "" } else { "," };
+      out.push_str(&format!("  \"{}\"{}\n", source.replace('"', "\\\""), sep));
+    }
+    out.push_str(")\n");
+    out.push_str("loaded_data <- purrr::set_names(data_sources, basename(data_sources)) %>%\n");
+    out.push_str("  purrr::map(read_data_source)\n");
+    out.push_str("if (length(loaded_data) == 1) {\n");
+    out.push_str("  raw <- loaded_data[[1]]\n");
+    out.push_str("} else {\n");
+    out.push_str("  # TODO: Replace bind_rows() with study-specific joins if sources differ in structure.\n");
+    out.push_str("  raw <- dplyr::bind_rows(loaded_data, .id = \"source_file\")\n");
+    out.push_str("}\n");
+  }
   out.push_str("```\n\n");
   out.push_str("```{r clean_data}\n");
   out.push_str("df <- raw %>%\n");
@@ -1167,6 +1539,7 @@ fn render_analysis_rmd(
 }
 
 fn create_analysis_template_in_dir(
+  project_root: &Path,
   study_root: &Path,
   analysis_dir: &Path,
   study_id: &str,
@@ -1186,7 +1559,7 @@ fn create_analysis_template_in_dir(
     template_path = analysis_dir.join(format!("{file_base}_{stamp}.Rmd"));
   }
 
-  let template = render_analysis_rmd(study_id, study_title, options);
+  let template = render_analysis_rmd(project_root, study_root, study_id, study_title, options);
   fs::write(&template_path, template).map_err(|err| err.to_string())?;
   Ok(template_path)
 }
@@ -2056,6 +2429,7 @@ fn create_analysis_template(
   let analysis_dir = study_root.join(ANALYSIS_FOLDER);
   let template_path =
     create_analysis_template_in_dir(
+      &project_root,
       &study_root,
       &analysis_dir,
       &study_id,
@@ -2423,6 +2797,7 @@ mod tests {
   fn empty_options() -> AnalysisTemplateOptions {
     AnalysisTemplateOptions {
       analysis_file_name: None,
+      data_source_paths: None,
       dataset_path_hint: None,
       outcome_var_hint: None,
       treatment_var_hint: None,
@@ -2436,6 +2811,7 @@ mod tests {
       diagnostics: Vec::new(),
       tables: Vec::new(),
       robustness: Vec::new(),
+      model_layouts: Vec::new(),
       exploratory: false,
       export_artifacts: false
     }
@@ -2445,7 +2821,13 @@ mod tests {
   fn render_includes_selected_models_only() {
     let mut options = empty_options();
     options.models = vec!["ols".to_string()];
-    let rendered = render_analysis_rmd("S-ABC123", "Test Study", &options);
+    let rendered = render_analysis_rmd(
+      Path::new("project"),
+      Path::new("project/studies/S-ABC123"),
+      "S-ABC123",
+      "Test Study",
+      &options
+    );
     assert!(rendered.contains("## OLS"));
     assert!(!rendered.contains("## Logistic"));
     assert!(rendered.contains("source(here::here(\"R/style/theme_plots.R\"))"));
@@ -2460,6 +2842,7 @@ mod tests {
 
     let options = empty_options();
     let first = create_analysis_template_in_dir(
+      &base,
       &study_root,
       &analysis_dir,
       "S-ABC123",
@@ -2474,6 +2857,7 @@ mod tests {
     assert!(study_root.join("07_outputs").join("reports").exists());
 
     let second = create_analysis_template_in_dir(
+      &base,
       &study_root,
       &analysis_dir,
       "S-ABC123",
@@ -2538,6 +2922,7 @@ mod tests {
     options.analysis_file_name = Some("pilot_analysis".to_string());
 
     let first = create_analysis_template_in_dir(
+      &base,
       &study_root,
       &analysis_dir,
       "S-ABC123",
@@ -2550,6 +2935,73 @@ mod tests {
 
     let _ = fs::remove_dir_all(base);
   }
+
+  #[test]
+  fn render_uses_selected_data_sources_when_provided() {
+    let mut options = empty_options();
+    options.data_source_paths = Some(vec![
+      "/tmp/project/data/clean/a.csv".to_string(),
+      "/tmp/project/data/clean/b.tsv".to_string()
+    ]);
+
+    let rendered = render_analysis_rmd(
+      Path::new("project"),
+      Path::new("project/studies/S-ABC123"),
+      "S-ABC123",
+      "Test Study",
+      &options
+    );
+
+    assert!(rendered.contains("read_data_source <- function(path)"));
+    assert!(rendered.contains("/tmp/project/data/clean/a.csv"));
+    assert!(rendered.contains("/tmp/project/data/clean/b.tsv"));
+  }
+
+  #[test]
+  fn render_groups_model_tables_by_outcome_from_layouts() {
+    let mut options = empty_options();
+    options.tables = vec!["model_table".to_string()];
+    options.model_layouts = vec![
+      ModelLayout {
+        name: "Model A".to_string(),
+        model_type: "ols".to_string(),
+        outcome_var: "y1".to_string(),
+        treatment_var: Some("x1 + x2".to_string()),
+        layout: "simple".to_string(),
+        interaction_var: None,
+        covariates: Some("x1 + x2".to_string()),
+        id_var: None,
+        time_var: None,
+        figures: vec!["coef_plot".to_string()],
+        include_in_main_table: true
+      },
+      ModelLayout {
+        name: "Model B".to_string(),
+        model_type: "ols".to_string(),
+        outcome_var: "y2".to_string(),
+        treatment_var: Some("x3".to_string()),
+        layout: "simple".to_string(),
+        interaction_var: None,
+        covariates: Some("x3".to_string()),
+        id_var: None,
+        time_var: None,
+        figures: vec!["coef_plot".to_string()],
+        include_in_main_table: true
+      }
+    ];
+
+    let rendered = render_analysis_rmd(
+      Path::new("project"),
+      Path::new("project/studies/S-ABC123"),
+      "S-ABC123",
+      "Test Study",
+      &options
+    );
+    assert!(rendered.contains("models_y1.html"));
+    assert!(rendered.contains("models_y2.html"));
+    assert!(rendered.contains("Main Figures by Outcome"));
+  }
+
 }
 
 fn main() {

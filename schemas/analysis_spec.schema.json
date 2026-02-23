@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AnalysisSpec",
+  "type": "object",
+  "required": ["projectId", "studyId", "analysisId", "inputs", "dataContract", "variableMappings", "models", "outputs", "templateBindings", "warnings"],
+  "properties": {
+    "projectId": {"type": "string"},
+    "studyId": {"type": "string"},
+    "analysisId": {"type": "string"},
+    "inputs": {"type": "object"},
+    "dataContract": {"type": "object"},
+    "variableMappings": {"type": "array"},
+    "models": {"type": "object"},
+    "outputs": {"type": "object"},
+    "templateBindings": {"type": "object"},
+    "warnings": {"type": "array"}
+  }
+}

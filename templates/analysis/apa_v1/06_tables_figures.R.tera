@@ -1,0 +1,12 @@
+```{r tables_figures}
+dir.create(paths$tables_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(paths$figures_dir, recursive = TRUE, showWarnings = FALSE)
+
+# TODO: build descriptives using make_apa_descriptives
+for (nm in names(models_main)) {
+  ft <- make_apa_model_table(models_main[[nm]], title = nm)
+  save_apa_table(ft, file.path(paths$tables_dir, paste0(nm, ".docx")))
+  p <- plot_apa_coef(models_main[[nm]])
+  save_apa_plot(p, file.path(paths$figures_dir, paste0(nm, "_coef.png")))
+}
+```

@@ -18,6 +18,7 @@ type WizardProps = {
   projectId: string;
   studyId: string;
   loading: boolean;
+  initialOptions?: Partial<AnalysisTemplateOptions> | null;
   onPickDataSources: () => Promise<string[]>;
   onClose: () => void;
   onSubmit: (options: AnalysisTemplateOptions) => Promise<void>;
@@ -164,6 +165,7 @@ export function AnalysisTemplateWizard({
   projectId,
   studyId,
   loading,
+  initialOptions,
   onPickDataSources,
   onClose,
   onSubmit
@@ -176,10 +178,10 @@ export function AnalysisTemplateWizard({
   useEffect(() => {
     if (!isOpen) return;
     setStep(0);
-    setOptions(defaultOptions());
+    setOptions(mergeInitialOptions(initialOptions));
     setModelLayoutDraft(defaultModelLayoutDraft());
     setShowAllDataSources(false);
-  }, [isOpen, projectId, studyId]);
+  }, [isOpen, projectId, studyId, initialOptions]);
 
   const selectedModelTypes = useMemo(
     () =>
@@ -743,3 +745,22 @@ export function AnalysisTemplateWizard({
     </div>
   );
 }
+
+const mergeInitialOptions = (
+  initialOptions?: Partial<AnalysisTemplateOptions> | null
+): AnalysisTemplateOptions => {
+  const base = defaultOptions();
+  if (!initialOptions) return base;
+  return {
+    ...base,
+    ...initialOptions,
+    descriptives: initialOptions.descriptives ?? base.descriptives,
+    plots: initialOptions.plots ?? base.plots,
+    balanceChecks: initialOptions.balanceChecks ?? base.balanceChecks,
+    models: initialOptions.models ?? base.models,
+    diagnostics: initialOptions.diagnostics ?? base.diagnostics,
+    tables: initialOptions.tables ?? base.tables,
+    robustness: initialOptions.robustness ?? base.robustness,
+    modelLayouts: initialOptions.modelLayouts ?? base.modelLayouts
+  };
+};

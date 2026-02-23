@@ -1,0 +1,22 @@
+```{r import_clean}
+raw <- readr::read_csv(paths$data_raw, show_col_types = FALSE)
+df <- raw %>% janitor::clean_names()
+
+# Apply exclusions
+{% for ex in spec.dataContract.exclusions %}
+# {{ ex.id }}: {{ ex.criterion }}
+{{ ex.rFilter }}
+{% endfor %}
+
+# Derived variables
+{% for d in spec.dataContract.derivedVariables %}
+# {{ d.name }}
+{% if d.derivedType == "counterbalance_merge" %}
+df <- df %>% dplyr::mutate(`{{ d.name }}` = {{ d.definition }})
+{% else %}
+# TODO: {{ d.definition }}
+{% endif %}
+{% endfor %}
+
+readr::write_csv(df, paths$data_clean)
+```

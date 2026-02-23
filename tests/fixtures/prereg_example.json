@@ -1,0 +1,12 @@
+{
+  "variables": {
+    "dv": ["dv_choice"],
+    "iv": ["treatment_group"],
+    "controls": ["age"],
+    "moderators": [],
+    "mediators": []
+  },
+  "mainAnalyses": [
+    {"id": "main_1", "dv": "dv_choice", "iv": ["treatment_group"], "controls": ["age"], "interactionTerms": [], "formula": "dv_choice ~ treatment_group + age"}
+  ]
+}

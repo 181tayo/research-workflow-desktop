@@ -1,0 +1,14 @@
+---
+title: "Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+paths <- list(
+  data_raw = "{{ spec.templateBindings.paths.data_raw }}",
+  data_clean = "{{ spec.templateBindings.paths.data_clean }}",
+  tables_dir = "{{ spec.templateBindings.paths.tables_dir }}",
+  figures_dir = "{{ spec.templateBindings.paths.figures_dir }}"
+)
+```

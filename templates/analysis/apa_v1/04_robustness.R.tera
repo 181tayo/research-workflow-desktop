@@ -1,0 +1,6 @@
+```{r robustness}
+models_robust <- list()
+{% for m in spec.models.robustness %}
+models_robust[["{{ m.id }}"]] <- lm({{ m.formula }}, data = df)
+{% endfor %}
+```

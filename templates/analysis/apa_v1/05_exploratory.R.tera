@@ -1,0 +1,6 @@
+```{r exploratory}
+models_exploratory <- list()
+{% for m in spec.models.exploratory %}
+models_exploratory[["{{ m.id }}"]] <- lm({{ m.formula }}, data = df)
+{% endfor %}
+```

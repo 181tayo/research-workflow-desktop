@@ -1,0 +1,6 @@
+```{r appendix}
+# Warnings recap
+warnings <- {{ spec.warnings | json_encode() }}
+print(warnings)
+sessionInfo()
+```

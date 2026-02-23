@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/tauri";
 import { open } from "@tauri-apps/api/dialog";
 import { AnalysisTemplateWizard } from "./components/AnalysisTemplateWizard";
+import { AnalysisCreateFromInputs } from "./components/AnalysisCreateFromInputs";
 import { AnalysisTemplateOptions } from "./types/analysisTemplate";
 
 const STATUSES = [
@@ -111,6 +112,14 @@ export default function App() {
   const [deleteStudyOnDisk, setDeleteStudyOnDisk] = useState(false);
   const [isAnalysisModalOpen, setIsAnalysisModalOpen] = useState(false);
   const [analysisTarget, setAnalysisTarget] = useState<{
+    projectId: string;
+    studyId: string;
+  } | null>(null);
+  const [analysisPrefillOptions, setAnalysisPrefillOptions] = useState<
+    Partial<AnalysisTemplateOptions> | null
+  >(null);
+  const [isInputAnalysisModalOpen, setIsInputAnalysisModalOpen] = useState(false);
+  const [inputAnalysisTarget, setInputAnalysisTarget] = useState<{
     projectId: string;
     studyId: string;
   } | null>(null);
@@ -795,10 +804,21 @@ export default function App() {
     }
   };
 
-  const openAnalysisModal = (projectId: string, studyId: string) => {
+  const openAnalysisModal = (
+    projectId: string,
+    studyId: string,
+    initialOptions?: Partial<AnalysisTemplateOptions> | null
+  ) => {
     setError(null);
+    setAnalysisPrefillOptions(initialOptions ?? null);
     setAnalysisTarget({ projectId, studyId });
     setIsAnalysisModalOpen(true);
+  };
+
+  const openInputAnalysisModal = (projectId: string, studyId: string) => {
+    setError(null);
+    setInputAnalysisTarget({ projectId, studyId });
+    setIsInputAnalysisModalOpen(true);
   };
 
   const openRemoveAnalysisModal = async (projectId: string, studyId: string) => {
@@ -850,6 +870,12 @@ export default function App() {
   const closeAnalysisModal = () => {
     setIsAnalysisModalOpen(false);
     setAnalysisTarget(null);
+    setAnalysisPrefillOptions(null);
+  };
+
+  const closeInputAnalysisModal = () => {
+    setIsInputAnalysisModalOpen(false);
+    setInputAnalysisTarget(null);
   };
 
   const handleRemoveFile = async (path: string) => {
@@ -1021,6 +1047,18 @@ export default function App() {
                       disabled={!selectedProjectId}
                     >
                       Add analysis
+                    </button>
+                    <button
+                      className="list-action"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if (selectedProjectId) {
+                          openInputAnalysisModal(selectedProjectId, study.id);
+                        }
+                      }}
+                      disabled={!selectedProjectId}
+                    >
+                      Add analysis (inputs)
                     </button>
                     <button
                       className="list-action ghost"
@@ -1394,6 +1432,7 @@ export default function App() {
           projectId={analysisTarget.projectId}
           studyId={analysisTarget.studyId}
           loading={loading}
+          initialOptions={analysisPrefillOptions}
           onPickDataSources={handlePickAnalysisDataSources}
           onClose={closeAnalysisModal}
           onSubmit={(options) =>
@@ -1404,6 +1443,33 @@ export default function App() {
             )
           }
         />
+      )}
+
+      {isInputAnalysisModalOpen && inputAnalysisTarget && (
+        <div className="modal-backdrop" onClick={closeInputAnalysisModal}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Create Analysis From Inputs</h2>
+              <button className="ghost" onClick={closeInputAnalysisModal}>
+                Close
+              </button>
+            </div>
+            <div className="modal-body">
+              <AnalysisCreateFromInputs
+                projectId={inputAnalysisTarget.projectId}
+                studyId={inputAnalysisTarget.studyId}
+                onUseInBuilder={(prefill) => {
+                  closeInputAnalysisModal();
+                  openAnalysisModal(
+                    inputAnalysisTarget.projectId,
+                    inputAnalysisTarget.studyId,
+                    prefill
+                  );
+                }}
+              />
+            </div>
+          </div>
+        </div>
       )}
 
       {isRemoveAnalysisModalOpen && removeAnalysisTarget && (

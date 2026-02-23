@@ -1,0 +1,9 @@
+```{r main_models}
+models_main <- list()
+{% for m in spec.models.main %}
+models_main[["{{ m.id }}"]] <- lm({{ m.formula }}, data = df)
+{% if m.unresolvedVariables | length > 0 %}
+# TODO unresolved vars: {{ m.unresolvedVariables | join(sep=", ") }}
+{% endif %}
+{% endfor %}
+```

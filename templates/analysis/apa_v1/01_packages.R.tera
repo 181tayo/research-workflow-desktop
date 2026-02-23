@@ -1,0 +1,9 @@
+```{r packages}
+{% for pkg in spec.templateBindings.packages %}
+library({{ pkg }})
+{% endfor %}
+source("styles/{{ spec.templateBindings.styleProfile }}/style.R")
+source("styles/{{ spec.templateBindings.styleProfile }}/helpers.R")
+source("styles/{{ spec.templateBindings.styleProfile }}/tables.R")
+source("styles/{{ spec.templateBindings.styleProfile }}/plots.R")
+```

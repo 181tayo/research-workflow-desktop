@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QsfSurveySpec",
+  "type": "object",
+  "required": ["surveyName", "questions", "embeddedData", "expectedColumns", "labelMap"],
+  "properties": {
+    "surveyName": {"type": "string"},
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["qualtricsQid", "exportTag", "questionText", "questionType", "choices"],
+        "properties": {
+          "qualtricsQid": {"type": "string"},
+          "exportTag": {"type": "string"},
+          "questionText": {"type": "string"},
+          "questionType": {"type": "string"},
+          "choices": {"type": "array"}
+        }
+      }
+    },
+    "embeddedData": {"type": "array", "items": {"type": "string"}},
+    "expectedColumns": {"type": "array", "items": {"type": "string"}},
+    "labelMap": {"type": "object"}
+  }
+}

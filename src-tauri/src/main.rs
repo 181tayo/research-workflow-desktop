@@ -1,5 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod commands;
+mod prereg;
+mod qsf;
+mod render;
+mod spec;
+mod util;
+
 use chrono::Utc;
 use pathdiff::diff_paths;
 use rusqlite::{params, Connection};
@@ -11,6 +18,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tauri::AppHandle;
 use uuid::Uuid;
+
+use commands::analysis::{
+  generate_analysis_spec, parse_prereg, parse_qsf, render_analysis_from_spec, resolve_mappings,
+  save_analysis_spec
+};
+use commands::assets::{list_build_assets, list_prereg_assets};
 
 const PROJECT_FOLDERS: &[&str] = &["studies", "paper", "templates"];
 const STUDY_FOLDERS: &[&str] = &[
@@ -26,6 +39,8 @@ const STUDY_FOLDERS: &[&str] = &[
 ];
 const ANALYSIS_FOLDER: &str = "06_analysis";
 const STYLE_KIT_DIR: &str = "R/style";
+const STYLE_PACKAGE_NAME: &str = "researchworkflowstyle";
+const STYLE_PACKAGE_DIR: &str = "R/researchworkflowstyle";
 const ANALYSIS_CONFIG_PATH: &str = "config/analysis_defaults.json";
 
 const DEFAULT_ANALYSIS_CONFIG_JSON: &str = r#"{
@@ -33,6 +48,10 @@ const DEFAULT_ANALYSIS_CONFIG_JSON: &str = r#"{
   "styleKit": {
     "mode": "project",
     "path": "R/style"
+  },
+  "stylePackage": {
+    "name": "researchworkflowstyle",
+    "path": "R/researchworkflowstyle"
   },
   "modules": {
     "plots": true,
@@ -106,6 +125,109 @@ apa_box <- function(df, x, y, ...) {
     geom_boxplot(...) +
     theme_apa()
 }
+
+theme_study_plot <- function(base_family = "Times New Roman") {
+  ggplot2::theme(
+    text = ggplot2::element_text(family = base_family),
+    axis.text.x = ggplot2::element_text(size = 11),
+    axis.text.y = ggplot2::element_text(size = 14),
+    axis.title = ggplot2::element_text(size = 12, face = "bold"),
+    axis.title.x = ggplot2::element_text(size = 16, face = "bold"),
+    axis.title.y = ggplot2::element_text(size = 16, face = "bold"),
+    legend.text = ggplot2::element_text(size = 12),
+    legend.title = ggplot2::element_text(size = 12),
+    plot.title = ggplot2::element_text(size = 18, face = "bold", hjust = 0.5),
+    strip.background = ggplot2::element_rect(fill = "white"),
+    strip.text = ggplot2::element_text(size = 12, face = "bold"),
+    legend.background = ggplot2::element_rect(fill = "white", color = "white"),
+    panel.background = ggplot2::element_rect(fill = "white", color = "white"),
+    plot.background = ggplot2::element_rect(fill = "white", color = "white")
+  )
+}
+
+style_box_plot <- function(
+  data,
+  x_col,
+  y_col,
+  fill_col = x_col,
+  color_col = x_col,
+  facet_col = NULL,
+  palette = NULL,
+  add_jitter = TRUE,
+  y_breaks = NULL,
+  y_labels = waiver(),
+  hline_at = NULL,
+  xlab = "",
+  ylab = "",
+  title = ""
+) {
+  p <- ggpubr::ggboxplot(
+    data = data,
+    x = x_col,
+    y = y_col,
+    fill = fill_col,
+    color = color_col,
+    facet.by = facet_col,
+    add = if (isTRUE(add_jitter)) "jitter" else "none",
+    add.params = list(alpha = 0.3, size = 0.9),
+    palette = palette,
+    xlab = xlab,
+    ylab = ylab,
+    title = title
+  )
+  if (!is.null(y_breaks)) {
+    p <- p + ggplot2::scale_y_continuous(breaks = y_breaks, labels = y_labels)
+  }
+  if (!is.null(hline_at)) {
+    p <- p + ggplot2::geom_hline(yintercept = hline_at, linetype = "dashed", color = "black", linewidth = 0.8)
+  }
+  p + theme_study_plot()
+}
+
+style_bar_plot <- function(
+  data,
+  x_col,
+  y_col,
+  fill_col = x_col,
+  color_col = x_col,
+  facet_col = NULL,
+  palette = NULL,
+  add = "mean_se",
+  y_breaks = NULL,
+  compare_groups = NULL,
+  compare_method = "t.test",
+  compare_label = "p.signif",
+  compare_label_y = NULL,
+  xlab = "",
+  ylab = "",
+  title = ""
+) {
+  p <- ggpubr::ggbarplot(
+    data = data,
+    x = x_col,
+    y = y_col,
+    fill = fill_col,
+    color = color_col,
+    facet.by = facet_col,
+    add = add,
+    palette = palette,
+    xlab = xlab,
+    ylab = ylab,
+    title = title
+  )
+  if (!is.null(y_breaks)) {
+    p <- p + ggplot2::scale_y_continuous(breaks = y_breaks)
+  }
+  if (!is.null(compare_groups)) {
+    p <- p + ggpubr::stat_compare_means(
+      comparisons = compare_groups,
+      method = compare_method,
+      label = compare_label,
+      label.y = compare_label_y
+    )
+  }
+  p + theme_study_plot()
+}
 "#;
 
 const TABLES_FLEXTABLE_R: &str = r#"# R/style/tables_flextable.R
@@ -125,9 +247,9 @@ ft_apa <- function(x,
   ft <- flextable::align(ft, align = "center", part = "header")
   ft <- flextable::align(ft, align = "center", part = "body")
   ft <- flextable::border_remove(ft)
-  ft <- flextable::hline_top(ft, border = fp_border(width = 1))
-  ft <- flextable::hline(ft, i = 1, border = fp_border(width = 1), part = "header")
-  ft <- flextable::hline_bottom(ft, border = fp_border(width = 1))
+  ft <- flextable::hline_top(ft, border = officer::fp_border(width = 1))
+  ft <- flextable::hline(ft, i = 1, border = officer::fp_border(width = 1), part = "header")
+  ft <- flextable::hline_bottom(ft, border = officer::fp_border(width = 1))
   if (isTRUE(header_bold)) {
     ft <- flextable::bold(ft, part = "header")
   }
@@ -160,6 +282,37 @@ ft_apa_descriptives <- function(df, digits = 2) {
 
 ft_apa_regression <- function(model, ...) {
   stop("ft_apa_regression() is a placeholder. Consider using broom + dplyr to create a data.frame, then pass to ft_apa().")
+}
+
+style_model_table <- function(
+  models,
+  output_path = NULL,
+  estimate = "{estimate}{stars}",
+  statistic = "({std.error})",
+  stars = c("*" = .05, "**" = .01, "***" = .001),
+  ...
+) {
+  if (!requireNamespace("modelsummary", quietly = TRUE)) {
+    stop("Package `modelsummary` is required for style_model_table().")
+  }
+  tbl <- modelsummary::modelsummary(
+    models,
+    estimate = estimate,
+    statistic = statistic,
+    stars = stars,
+    ...
+  )
+  if (!is.null(output_path)) {
+    modelsummary::modelsummary(
+      models,
+      estimate = estimate,
+      statistic = statistic,
+      stars = stars,
+      output = output_path,
+      ...
+    )
+  }
+  tbl
 }
 "#;
 
@@ -202,6 +355,340 @@ This folder contains shared, project-level styling helpers used by generated ana
 - `style_init.R`: Initializes style defaults from `config/analysis_defaults.json`.
 
 Customize these files once to affect all future analyses that source them.
+"#;
+
+const STYLE_PACKAGE_DESCRIPTION: &str = r#"Package: researchworkflowstyle
+Type: Package
+Title: Shared Figure and Table Style Helpers
+Version: 0.1.0
+Authors@R: person("Research", "Team", email = "noreply@example.com", role = c("aut", "cre"))
+Description: Shared plotting and table helpers for project analysis templates.
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 7.3.2
+Depends:
+    R (>= 4.1.0)
+Imports:
+    flextable,
+    ggpubr,
+    ggplot2,
+    here,
+    rlang,
+    officer
+Suggests:
+    dplyr,
+    gganimate,
+    jsonlite,
+    modelsummary,
+    stringr
+"#;
+
+const STYLE_PACKAGE_NAMESPACE: &str = r#"export(theme_apa)
+export(set_apa_plot_defaults)
+export(apa_scatter)
+export(apa_hist)
+export(apa_box)
+export(theme_study_plot)
+export(style_box_plot)
+export(style_bar_plot)
+export(ft_apa)
+export(ft_apa_descriptives)
+export(ft_apa_regression)
+export(style_model_table)
+export(init_project_style)
+"#;
+
+const STYLE_PACKAGE_LICENSE: &str = r#"MIT License
+
+Copyright (c) 2026
+"#;
+
+const STYLE_PACKAGE_PLOTS_R: &str = r#"# R/researchworkflowstyle/R/plots.R
+
+theme_apa <- function(base_size = 12, base_family = "Times New Roman") {
+  ggplot2::theme_classic(base_size = base_size, base_family = base_family) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold", size = base_size + 2, hjust = 0),
+      plot.subtitle = ggplot2::element_text(size = base_size, hjust = 0),
+      plot.caption = ggplot2::element_text(size = base_size - 2, hjust = 1),
+      axis.title = ggplot2::element_text(size = base_size),
+      axis.text  = ggplot2::element_text(size = base_size - 1),
+      legend.title = ggplot2::element_text(size = base_size - 1),
+      legend.text = ggplot2::element_text(size = base_size - 1),
+      panel.grid.major.y = ggplot2::element_line(linewidth = 0.25, color = "grey85"),
+      panel.grid.minor = ggplot2::element_blank(),
+      axis.line = ggplot2::element_line(linewidth = 0.5, color = "black"),
+      plot.margin = ggplot2::margin(10, 10, 10, 10)
+    )
+}
+
+set_apa_plot_defaults <- function(base_size = 12, base_family = "Times New Roman") {
+  ggplot2::theme_set(theme_apa(base_size = base_size, base_family = base_family))
+  invisible(TRUE)
+}
+
+apa_scatter <- function(df, x, y, add_lm = FALSE, se = TRUE, ...) {
+  xq <- rlang::enquo(x)
+  yq <- rlang::enquo(y)
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = !!xq, y = !!yq)) +
+    ggplot2::geom_point(...) +
+    theme_apa()
+  if (isTRUE(add_lm)) {
+    p <- p + ggplot2::geom_smooth(method = "lm", se = se, linewidth = 0.6)
+  }
+  p
+}
+
+apa_hist <- function(df, x, bins = 30, ...) {
+  xq <- rlang::enquo(x)
+  ggplot2::ggplot(df, ggplot2::aes(x = !!xq)) +
+    ggplot2::geom_histogram(bins = bins, ...) +
+    theme_apa()
+}
+
+apa_box <- function(df, x, y, ...) {
+  xq <- rlang::enquo(x)
+  yq <- rlang::enquo(y)
+  ggplot2::ggplot(df, ggplot2::aes(x = !!xq, y = !!yq)) +
+    ggplot2::geom_boxplot(...) +
+    theme_apa()
+}
+
+theme_study_plot <- function(base_family = "Times New Roman") {
+  ggplot2::theme(
+    text = ggplot2::element_text(family = base_family),
+    axis.text.x = ggplot2::element_text(size = 11),
+    axis.text.y = ggplot2::element_text(size = 14),
+    axis.title = ggplot2::element_text(size = 12, face = "bold"),
+    axis.title.x = ggplot2::element_text(size = 16, face = "bold"),
+    axis.title.y = ggplot2::element_text(size = 16, face = "bold"),
+    legend.text = ggplot2::element_text(size = 12),
+    legend.title = ggplot2::element_text(size = 12),
+    plot.title = ggplot2::element_text(size = 18, face = "bold", hjust = 0.5),
+    strip.background = ggplot2::element_rect(fill = "white"),
+    strip.text = ggplot2::element_text(size = 12, face = "bold"),
+    legend.background = ggplot2::element_rect(fill = "white", color = "white"),
+    panel.background = ggplot2::element_rect(fill = "white", color = "white"),
+    plot.background = ggplot2::element_rect(fill = "white", color = "white")
+  )
+}
+
+style_box_plot <- function(
+  data,
+  x_col,
+  y_col,
+  fill_col = x_col,
+  color_col = x_col,
+  facet_col = NULL,
+  palette = NULL,
+  add_jitter = TRUE,
+  y_breaks = NULL,
+  y_labels = waiver(),
+  hline_at = NULL,
+  xlab = "",
+  ylab = "",
+  title = ""
+) {
+  p <- ggpubr::ggboxplot(
+    data = data,
+    x = x_col,
+    y = y_col,
+    fill = fill_col,
+    color = color_col,
+    facet.by = facet_col,
+    add = if (isTRUE(add_jitter)) "jitter" else "none",
+    add.params = list(alpha = 0.3, size = 0.9),
+    palette = palette,
+    xlab = xlab,
+    ylab = ylab,
+    title = title
+  )
+  if (!is.null(y_breaks)) {
+    p <- p + ggplot2::scale_y_continuous(breaks = y_breaks, labels = y_labels)
+  }
+  if (!is.null(hline_at)) {
+    p <- p + ggplot2::geom_hline(yintercept = hline_at, linetype = "dashed", color = "black", linewidth = 0.8)
+  }
+  p + theme_study_plot()
+}
+
+style_bar_plot <- function(
+  data,
+  x_col,
+  y_col,
+  fill_col = x_col,
+  color_col = x_col,
+  facet_col = NULL,
+  palette = NULL,
+  add = "mean_se",
+  y_breaks = NULL,
+  compare_groups = NULL,
+  compare_method = "t.test",
+  compare_label = "p.signif",
+  compare_label_y = NULL,
+  xlab = "",
+  ylab = "",
+  title = ""
+) {
+  p <- ggpubr::ggbarplot(
+    data = data,
+    x = x_col,
+    y = y_col,
+    fill = fill_col,
+    color = color_col,
+    facet.by = facet_col,
+    add = add,
+    palette = palette,
+    xlab = xlab,
+    ylab = ylab,
+    title = title
+  )
+  if (!is.null(y_breaks)) {
+    p <- p + ggplot2::scale_y_continuous(breaks = y_breaks)
+  }
+  if (!is.null(compare_groups)) {
+    p <- p + ggpubr::stat_compare_means(
+      comparisons = compare_groups,
+      method = compare_method,
+      label = compare_label,
+      label.y = compare_label_y
+    )
+  }
+  p + theme_study_plot()
+}
+"#;
+
+const STYLE_PACKAGE_TABLES_R: &str = r#"# R/researchworkflowstyle/R/tables.R
+
+ft_apa <- function(
+  x,
+  font_family = "Times New Roman",
+  font_size = 12,
+  header_bold = TRUE,
+  autofit = TRUE,
+  digits = NULL
+) {
+  if (is.data.frame(x) && !is.null(digits)) {
+    num_cols <- vapply(x, is.numeric, logical(1))
+    x[num_cols] <- lapply(x[num_cols], round, digits = digits)
+  }
+  ft <- flextable::flextable(x)
+  ft <- flextable::font(ft, fontname = font_family, part = "all")
+  ft <- flextable::fontsize(ft, size = font_size, part = "all")
+  ft <- flextable::align(ft, align = "center", part = "header")
+  ft <- flextable::align(ft, align = "center", part = "body")
+  ft <- flextable::border_remove(ft)
+  ft <- flextable::hline_top(ft, border = officer::fp_border(width = 1))
+  ft <- flextable::hline(ft, i = 1, border = officer::fp_border(width = 1), part = "header")
+  ft <- flextable::hline_bottom(ft, border = officer::fp_border(width = 1))
+  if (isTRUE(header_bold)) {
+    ft <- flextable::bold(ft, part = "header")
+  }
+  if (isTRUE(autofit)) {
+    ft <- flextable::autofit(ft)
+  }
+  ft
+}
+
+ft_apa_descriptives <- function(df, digits = 2) {
+  num <- df[, vapply(df, is.numeric, logical(1)), drop = FALSE]
+  if (ncol(num) == 0) {
+    stop("No numeric columns found for descriptives.")
+  }
+  out <- data.frame(
+    Variable = names(num),
+    N = vapply(num, function(x) sum(!is.na(x)), numeric(1)),
+    Mean = vapply(num, function(x) mean(x, na.rm = TRUE), numeric(1)),
+    SD = vapply(num, function(x) stats::sd(x, na.rm = TRUE), numeric(1)),
+    Min = vapply(num, function(x) min(x, na.rm = TRUE), numeric(1)),
+    Max = vapply(num, function(x) max(x, na.rm = TRUE), numeric(1)),
+    check.names = FALSE
+  )
+
+  out$Mean <- round(out$Mean, digits)
+  out$SD <- round(out$SD, digits)
+  out$Min <- round(out$Min, digits)
+  out$Max <- round(out$Max, digits)
+
+  ft_apa(out)
+}
+
+ft_apa_regression <- function(model, ...) {
+  stop("ft_apa_regression() is a placeholder. Build a data.frame then pass to ft_apa().")
+}
+
+style_model_table <- function(
+  models,
+  output_path = NULL,
+  digits = 3,
+  estimate = "{estimate}{stars}",
+  statistic = "({std.error})",
+  stars = c("*" = .05, "**" = .01, "***" = .001),
+  ...
+) {
+  if (!requireNamespace("modelsummary", quietly = TRUE)) {
+    stop("Package `modelsummary` is required for style_model_table().")
+  }
+  tbl <- modelsummary::modelsummary(
+    models,
+    fmt = digits,
+    estimate = estimate,
+    statistic = statistic,
+    stars = stars,
+    ...
+  )
+  if (!is.null(output_path)) {
+    modelsummary::modelsummary(
+      models,
+      fmt = digits,
+      estimate = estimate,
+      statistic = statistic,
+      stars = stars,
+      output = output_path,
+      ...
+    )
+  }
+  tbl
+}
+"#;
+
+const STYLE_PACKAGE_INIT_R: &str = r#"# R/researchworkflowstyle/R/init.R
+
+init_project_style <- function(config_path = here::here("config/analysis_defaults.json")) {
+  cfg <- list(
+    plots = list(base_family = "Times New Roman", base_size = 12),
+    tables = list(font_family = "Times New Roman", font_size = 12, header_bold = TRUE, autofit = TRUE)
+  )
+
+  if (file.exists(config_path) && requireNamespace("jsonlite", quietly = TRUE)) {
+    user_cfg <- jsonlite::fromJSON(config_path, simplifyVector = TRUE)
+    if (!is.null(user_cfg$plots)) {
+      cfg$plots <- utils::modifyList(cfg$plots, user_cfg$plots)
+    }
+    if (!is.null(user_cfg$tables)) {
+      cfg$tables <- utils::modifyList(cfg$tables, user_cfg$tables)
+    }
+  }
+
+  set_apa_plot_defaults(
+    base_size = cfg$plots$base_size,
+    base_family = cfg$plots$base_family
+  )
+
+  invisible(cfg)
+}
+"#;
+
+const STYLE_PACKAGE_README_MD: &str = r#"# researchworkflowstyle
+
+Local project package for shared figure and table styling helpers used by generated analysis templates.
+
+Usage in analysis scripts:
+- Prefer `researchworkflowstyle::init_project_style()`.
+- Use `researchworkflowstyle::theme_apa()` and `researchworkflowstyle::ft_apa()` directly.
+- Use `researchworkflowstyle::style_box_plot()` and `researchworkflowstyle::style_bar_plot()` for consistent figure styling.
+- Use `researchworkflowstyle::style_model_table()` for consistent regression table output.
 "#;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -547,7 +1034,7 @@ fn selected(values: &[String], key: &str) -> bool {
 }
 
 fn collect_model_types(options: &AnalysisTemplateOptions) -> Vec<String> {
-  let mut out = options.models.clone();
+  let mut out: Vec<String> = Vec::new();
   for layout in &options.model_layouts {
     if !layout.model_type.trim().is_empty() && !out.iter().any(|m| m == &layout.model_type) {
       out.push(layout.model_type.clone());
@@ -558,6 +1045,44 @@ fn collect_model_types(options: &AnalysisTemplateOptions) -> Vec<String> {
 
 fn selected_model(options: &AnalysisTemplateOptions, key: &str) -> bool {
   collect_model_types(options).iter().any(|value| value == key)
+}
+
+fn model_outcomes(options: &AnalysisTemplateOptions, fallback: &str) -> Vec<String> {
+  let mut out: Vec<String> = Vec::new();
+  for layout in &options.model_layouts {
+    let value = layout.outcome_var.trim();
+    if !value.is_empty() && !out.iter().any(|item| item == value) {
+      out.push(value.to_string());
+    }
+  }
+  if out.is_empty() {
+    out.push(fallback.to_string());
+  }
+  out
+}
+
+fn primary_treatment_from_models(options: &AnalysisTemplateOptions, fallback: &str) -> String {
+  for layout in &options.model_layouts {
+    if let Some(value) = &layout.treatment_var {
+      let trimmed = value.trim();
+      if !trimmed.is_empty() {
+        return trimmed.to_string();
+      }
+    }
+  }
+  fallback.to_string()
+}
+
+fn primary_group_from_models(options: &AnalysisTemplateOptions, fallback: &str) -> String {
+  for layout in &options.model_layouts {
+    if let Some(value) = &layout.interaction_var {
+      let trimmed = value.trim();
+      if !trimmed.is_empty() {
+        return trimmed.to_string();
+      }
+    }
+  }
+  fallback.to_string()
 }
 
 fn safe_token(value: &str, fallback: &str) -> String {
@@ -697,6 +1222,18 @@ fn ensure_project_style_kit(project_root: &Path) -> Result<(), String> {
   write_if_missing(&style_dir.join("tables_flextable.R"), TABLES_FLEXTABLE_R)?;
   write_if_missing(&style_dir.join("style_init.R"), STYLE_INIT_R)?;
   write_if_missing(&style_dir.join("README.md"), STYLE_README_MD)?;
+
+  let pkg_dir = project_root.join(STYLE_PACKAGE_DIR);
+  let pkg_r_dir = pkg_dir.join("R");
+  fs::create_dir_all(&pkg_r_dir).map_err(|err| err.to_string())?;
+
+  write_if_missing(&pkg_dir.join("DESCRIPTION"), STYLE_PACKAGE_DESCRIPTION)?;
+  write_if_missing(&pkg_dir.join("NAMESPACE"), STYLE_PACKAGE_NAMESPACE)?;
+  write_if_missing(&pkg_dir.join("LICENSE"), STYLE_PACKAGE_LICENSE)?;
+  write_if_missing(&pkg_r_dir.join("plots.R"), STYLE_PACKAGE_PLOTS_R)?;
+  write_if_missing(&pkg_r_dir.join("tables.R"), STYLE_PACKAGE_TABLES_R)?;
+  write_if_missing(&pkg_r_dir.join("init.R"), STYLE_PACKAGE_INIT_R)?;
+  write_if_missing(&pkg_dir.join("README.md"), STYLE_PACKAGE_README_MD)?;
   Ok(())
 }
 
@@ -707,6 +1244,7 @@ fn render_packages(options: &AnalysisTemplateOptions) -> String {
     "janitor".to_string(),
     "ggplot2".to_string(),
     "ggpubr".to_string(),
+    "gganimate".to_string(),
     "flextable".to_string(),
     "modelsummary".to_string(),
     "broom".to_string(),
@@ -781,12 +1319,39 @@ fn render_packages(options: &AnalysisTemplateOptions) -> String {
   out
 }
 
-fn render_descriptives(options: &AnalysisTemplateOptions, outcome: &str, group: &str) -> String {
+fn render_descriptives(
+  options: &AnalysisTemplateOptions,
+  outcomes: &[String],
+  treatment: &str,
+  group: &str
+) -> String {
   if options.descriptives.is_empty() && options.plots.is_empty() {
     return String::new();
   }
   let mut out = String::new();
   out.push_str("# Descriptives\n\n");
+
+  if selected(&options.tables, "table1_descriptives") {
+    out.push_str("```{r descriptives_table1}\n");
+    out.push_str("table1_descriptives_df <- modelsummary::datasummary(\n");
+    out.push_str("  as.formula(\"");
+    out.push_str(
+      &outcomes
+        .iter()
+        .map(|item| item.replace('"', "\\\""))
+        .collect::<Vec<String>>()
+        .join(" + ")
+    );
+    out.push_str(" ~ ");
+    out.push_str(&group.replace('"', "\\\""));
+    out.push_str(" * (Mean + SD)\"),\n");
+    out.push_str("  df,\n");
+    out.push_str("  output = \"data.frame\"\n");
+    out.push_str(")\n");
+    out.push_str("table1_descriptives_ft <- ft_apa(table1_descriptives_df)\n");
+    out.push_str("table1_descriptives_ft\n");
+    out.push_str("```\n\n");
+  }
 
   if selected(&options.descriptives, "summary_stats") {
     out.push_str("```{r descriptives_summary_stats}\n");
@@ -800,8 +1365,8 @@ fn render_descriptives(options: &AnalysisTemplateOptions, outcome: &str, group: 
   if selected(&options.descriptives, "counts") {
     out.push_str("```{r descriptives_counts}\n");
     out.push_str("n_obs <- nrow(df)\n");
-    out.push_str(&format!("n_ids <- dplyr::n_distinct(df${group})\n"));
-    out.push_str(&format!("counts_by_group <- df %>% count({group})\n"));
+    out.push_str(&format!("n_ids <- dplyr::n_distinct(df${treatment})\n"));
+    out.push_str(&format!("counts_by_group <- df %>% count({treatment})\n"));
     out.push_str("counts_tbl <- tibble::tibble(\n");
     out.push_str("  Metric = c(\"N observations\", \"N IDs\"),\n");
     out.push_str("  Value = c(n_obs, n_ids)\n");
@@ -831,35 +1396,49 @@ fn render_descriptives(options: &AnalysisTemplateOptions, outcome: &str, group: 
   }
 
   if selected(&options.plots, "histogram") {
-    out.push_str("```{r descriptives_plot_histogram}\n");
-    out.push_str(&format!("p_hist <- apa_hist(df, {outcome}, bins = 30)\n"));
-    out.push_str("p_hist\n");
-    out.push_str("```\n\n");
+    for outcome in outcomes {
+      let token = safe_token(outcome, "outcome");
+      out.push_str(&format!("```{{r descriptives_plot_histogram_{token}}}\n"));
+      out.push_str(&format!("p_hist_{token} <- apa_hist(df, {outcome}, bins = 30)\n"));
+      out.push_str(&format!("p_hist_{token}\n"));
+      out.push_str("```\n\n");
+    }
   }
   if selected(&options.plots, "boxplot") {
-    out.push_str("```{r descriptives_plot_boxplot}\n");
-    out.push_str(&format!("p_box <- apa_box(df, {group}, {outcome})\n"));
-    out.push_str("p_box\n");
-    out.push_str("```\n\n");
+    for outcome in outcomes {
+      let token = safe_token(outcome, "outcome");
+      out.push_str(&format!("```{{r descriptives_plot_boxplot_{token}}}\n"));
+      out.push_str(&format!("p_box_{token} <- apa_box(df, {treatment}, {outcome})\n"));
+      out.push_str(&format!("p_box_{token}\n"));
+      out.push_str("```\n\n");
+    }
   }
   if selected(&options.plots, "density") {
-    out.push_str("```{r descriptives_plot_density}\n");
-    out.push_str(&format!("p_density <- ggplot(df, aes(x = {outcome})) + geom_density()\n"));
-    out.push_str("p_density\n");
-    out.push_str("```\n\n");
+    for outcome in outcomes {
+      let token = safe_token(outcome, "outcome");
+      out.push_str(&format!("```{{r descriptives_plot_density_{token}}}\n"));
+      out.push_str(&format!("p_density_{token} <- ggplot(df, aes(x = {outcome})) + geom_density()\n"));
+      out.push_str(&format!("p_density_{token}\n"));
+      out.push_str("```\n\n");
+    }
   }
   if selected(&options.plots, "scatter") {
-    out.push_str("```{r descriptives_plot_scatter}\n");
-    out.push_str("# TODO: replace x_var with a meaningful predictor\n");
-    out.push_str(&format!("p_scatter <- apa_scatter(df, x_var, {outcome}, add_lm = TRUE)\n"));
-    out.push_str("p_scatter\n");
-    out.push_str("```\n\n");
+    for outcome in outcomes {
+      let token = safe_token(outcome, "outcome");
+      out.push_str(&format!("```{{r descriptives_plot_scatter_{token}}}\n"));
+      out.push_str(&format!("p_scatter_{token} <- apa_scatter(df, {treatment}, {outcome}, add_lm = TRUE)\n"));
+      out.push_str(&format!("p_scatter_{token}\n"));
+      out.push_str("```\n\n");
+    }
   }
   if selected(&options.plots, "qqplot") {
-    out.push_str("```{r descriptives_plot_qq}\n");
-    out.push_str(&format!("p_qq <- ggplot(df, aes(sample = {outcome})) + stat_qq() + stat_qq_line()\n"));
-    out.push_str("p_qq\n");
-    out.push_str("```\n\n");
+    for outcome in outcomes {
+      let token = safe_token(outcome, "outcome");
+      out.push_str(&format!("```{{r descriptives_plot_qq_{token}}}\n"));
+      out.push_str(&format!("p_qq_{token} <- ggplot(df, aes(sample = {outcome})) + stat_qq() + stat_qq_line()\n"));
+      out.push_str(&format!("p_qq_{token}\n"));
+      out.push_str("```\n\n");
+    }
   }
   if selected(&options.plots, "correlation_heatmap") {
     out.push_str("```{r descriptives_plot_corr_heatmap}\n");
@@ -909,7 +1488,7 @@ fn render_balance_checks(options: &AnalysisTemplateOptions, treatment: &str) -> 
   out
 }
 
-fn render_models(options: &AnalysisTemplateOptions, outcome: &str, treatment: &str, id: &str, time: &str) -> String {
+fn render_models(options: &AnalysisTemplateOptions, _outcome: &str, treatment: &str, id: &str, time: &str) -> String {
   #[derive(Clone)]
   struct ModelPlan {
     name: String,
@@ -929,71 +1508,53 @@ fn render_models(options: &AnalysisTemplateOptions, outcome: &str, treatment: &s
   out.push_str("# Main Analyses\n\n");
 
   let mut plans: Vec<ModelPlan> = Vec::new();
-  if !options.model_layouts.is_empty() {
-    for (idx, layout) in options.model_layouts.iter().enumerate() {
-      let outcome_var = layout.outcome_var.trim();
-      if outcome_var.is_empty() {
-        continue;
-      }
-      let model_type = layout.model_type.trim().to_string();
-      if model_type.is_empty() {
-        continue;
-      }
-      let name = if layout.name.trim().is_empty() {
-        format!("model_{}", idx + 1)
-      } else {
-        layout.name.trim().to_string()
-      };
-      plans.push(ModelPlan {
-        name,
-        model_type,
-        outcome_var: outcome_var.to_string(),
-        treatment_var: layout
-          .treatment_var
-          .as_ref()
-          .map(|v| v.trim().to_string())
-          .filter(|v| !v.is_empty())
-          .unwrap_or_else(|| treatment.to_string()),
-        layout: layout.layout.trim().to_string(),
-        interaction_var: layout.interaction_var.clone().unwrap_or_default(),
-        covariates: layout.covariates.clone().unwrap_or_default(),
-        id_var: layout
-          .id_var
-          .as_ref()
-          .map(|v| v.trim().to_string())
-          .filter(|v| !v.is_empty())
-          .unwrap_or_else(|| id.to_string()),
-        time_var: layout
-          .time_var
-          .as_ref()
-          .map(|v| v.trim().to_string())
-          .filter(|v| !v.is_empty())
-          .unwrap_or_else(|| time.to_string()),
-        figures: layout.figures.clone(),
-        include_in_main_table: layout.include_in_main_table
-      });
+  for (idx, layout) in options.model_layouts.iter().enumerate() {
+    let outcome_var = layout.outcome_var.trim();
+    if outcome_var.is_empty() {
+      continue;
     }
-  } else {
-    for model_type in &options.models {
-      plans.push(ModelPlan {
-        name: model_type.to_uppercase(),
-        model_type: model_type.clone(),
-        outcome_var: outcome.to_string(),
-        treatment_var: treatment.to_string(),
-        layout: "simple".to_string(),
-        interaction_var: String::new(),
-        covariates: "covariate1 + covariate2".to_string(),
-        id_var: id.to_string(),
-        time_var: time.to_string(),
-        figures: vec!["coef_plot".to_string()],
-        include_in_main_table: true
-      });
+    let model_type = layout.model_type.trim().to_string();
+    if model_type.is_empty() {
+      continue;
     }
+    let name = if layout.name.trim().is_empty() {
+      format!("model_{}", idx + 1)
+    } else {
+      layout.name.trim().to_string()
+    };
+    plans.push(ModelPlan {
+      name,
+      model_type,
+      outcome_var: outcome_var.to_string(),
+      treatment_var: layout
+        .treatment_var
+        .as_ref()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| treatment.to_string()),
+      layout: layout.layout.trim().to_string(),
+      interaction_var: layout.interaction_var.clone().unwrap_or_default(),
+      covariates: layout.covariates.clone().unwrap_or_default(),
+      id_var: layout
+        .id_var
+        .as_ref()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| id.to_string()),
+      time_var: layout
+        .time_var
+        .as_ref()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| time.to_string()),
+      figures: layout.figures.clone(),
+      include_in_main_table: layout.include_in_main_table
+    });
   }
 
   if plans.is_empty() {
     out.push_str("```{r model_none}\n");
-    out.push_str("# TODO: Select model scaffolding in the wizard or add models manually.\n");
+    out.push_str("# TODO: Add at least one Model Layout in the model builder to generate analyses.\n");
     out.push_str("```\n\n");
     return out;
   }
@@ -1011,6 +1572,7 @@ fn render_models(options: &AnalysisTemplateOptions, outcome: &str, treatment: &s
 
   use std::collections::BTreeMap;
   let mut by_outcome: BTreeMap<String, Vec<(String, String, bool, String)>> = BTreeMap::new();
+  let mut figure_plans: Vec<(String, String, String, String)> = Vec::new();
   for (idx, plan) in plans.iter().enumerate() {
     let model_object = format!("m_{}", idx + 1);
     let chunk_id = safe_token(
@@ -1131,6 +1693,16 @@ fn render_models(options: &AnalysisTemplateOptions, outcome: &str, treatment: &s
         plan.include_in_main_table,
         figure_pref
       ));
+    figure_plans.push((
+      plan.name.clone(),
+      model_object.clone(),
+      plan.outcome_var.clone(),
+      plan
+        .figures
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "coef_plot".to_string())
+    ));
   }
 
   if selected(&options.tables, "model_table") {
@@ -1152,25 +1724,26 @@ fn render_models(options: &AnalysisTemplateOptions, outcome: &str, treatment: &s
         out.push_str(&format!("  \"{}\" = {}{}\n", name.replace('"', "\\\""), object, suffix));
       }
       out.push_str(")\n");
-      out.push_str("modelsummary::modelsummary(models_for_outcome)\n");
       out.push_str(&format!(
-        "modelsummary::modelsummary(models_for_outcome, output = file.path(tables_dir, \"models_{}.html\"))\n",
+        "style_model_table(models_for_outcome, output_path = file.path(tables_dir, \"models_{}.html\"))\n",
         file_outcome
       ));
       out.push_str("```\n\n");
     }
   }
 
-  out.push_str("## Main Figures by Outcome\n\n");
-  for (outcome_name, models) in &by_outcome {
-    if models.is_empty() {
-      continue;
-    }
-    let (_, first_obj, _, figure_pref) = &models[0];
-    let chunk = safe_token(&format!("main_figure_{}", outcome_name), "main_figure");
-    let clean_outcome = safe_token(outcome_name, "outcome");
+  out.push_str("## Main Figures by Model Builder Input\n\n");
+  for (model_name, model_object, outcome_name, figure_pref) in &figure_plans {
+    let chunk = safe_token(
+      &format!("main_figure_{}_{}", model_name, outcome_name),
+      "main_figure"
+    );
+    let clean_outcome = safe_token(
+      &format!("{}_{}", model_name, outcome_name),
+      "outcome"
+    );
     out.push_str(&format!("```{{r {}}}\n", chunk));
-    out.push_str(&format!("main_model <- {}\n", first_obj));
+    out.push_str(&format!("main_model <- {}\n", model_object));
     match figure_pref.as_str() {
       "fitted_plot" => {
         out.push_str("if (inherits(main_model, c(\"lm\", \"glm\"))) {\n");
@@ -1370,7 +1943,7 @@ fn render_exploratory(options: &AnalysisTemplateOptions) -> String {
   out
 }
 
-fn render_exports(options: &AnalysisTemplateOptions) -> String {
+fn render_exports(options: &AnalysisTemplateOptions, outcomes: &[String]) -> String {
   if !options.export_artifacts {
     return String::new();
   }
@@ -1384,9 +1957,10 @@ fn render_exports(options: &AnalysisTemplateOptions) -> String {
     out.push_str("# Model tables are exported in Main Analyses, grouped by outcome.\n");
   }
   if selected(&options.tables, "table1_descriptives") {
-    out.push_str("# TODO: export descriptives table.\n");
-    out.push_str("if (exists(\"summary_stats_ft\")) {\n");
-    out.push_str("  flextable::save_as_docx(summary_stats_ft, path = file.path(tables_dir, \"table1_descriptives.docx\"))\n");
+    out.push_str("if (exists(\"table1_descriptives_ft\")) {\n");
+    out.push_str("  flextable::save_as_docx(table1_descriptives_ft, path = file.path(tables_dir, \"table1_descriptives.docx\"))\n");
+    out.push_str("} else if (exists(\"summary_stats_ft\")) {\n");
+    out.push_str("  flextable::save_as_docx(summary_stats_ft, path = file.path(tables_dir, \"table1_summary_stats.docx\"))\n");
     out.push_str("}\n");
   }
   if selected(&options.tables, "balance_table") {
@@ -1396,14 +1970,23 @@ fn render_exports(options: &AnalysisTemplateOptions) -> String {
     out.push_str("# TODO: compute and export marginal effects table.\n");
   }
   if selected(&options.plots, "histogram") {
-    out.push_str("ggsave(file.path(figures_dir, \"hist_outcome.png\"), plot = p_hist, width = 7, height = 5, dpi = 300)\n");
+    for outcome in outcomes {
+      let token = safe_token(outcome, "outcome");
+      out.push_str(&format!(
+        "if (exists(\"p_hist_{}\")) ggsave(file.path(figures_dir, \"hist_{}.png\"), plot = p_hist_{}, width = 7, height = 5, dpi = 300)\n",
+        token, token, token
+      ));
+    }
   }
-  out.push_str("if (exists(\"model_metadata\")) {\n");
-  out.push_str("  outcomes <- unique(model_metadata$outcome)\n");
-  out.push_str("  for (oc in outcomes) {\n");
-  out.push_str("    obj <- get0(paste0(\"p_main_\", gsub(\"[^A-Za-z0-9_]+\", \"_\", oc)), ifnotfound = NULL)\n");
+  out.push_str("if (exists(\"model_metadata\") && nrow(model_metadata) > 0) {\n");
+  out.push_str("  for (i in seq_len(nrow(model_metadata))) {\n");
+  out.push_str("    mn <- model_metadata$model_name[[i]]\n");
+  out.push_str("    oc <- model_metadata$outcome[[i]]\n");
+  out.push_str("    key <- paste(mn, oc, sep = \"_\")\n");
+  out.push_str("    key_safe <- gsub(\"[^A-Za-z0-9_]+\", \"_\", key)\n");
+  out.push_str("    obj <- get0(paste0(\"p_main_\", key_safe), ifnotfound = NULL)\n");
   out.push_str("    if (!is.null(obj)) {\n");
-  out.push_str("      ggsave(file.path(figures_dir, paste0(\"main_figure_\", gsub(\"[^A-Za-z0-9_]+\", \"_\", oc), \".png\")), plot = obj, width = 7, height = 5, dpi = 300)\n");
+  out.push_str("      ggsave(file.path(figures_dir, paste0(\"main_figure_\", key_safe, \".png\")), plot = obj, width = 7, height = 5, dpi = 300)\n");
   out.push_str("    }\n");
   out.push_str("  }\n");
   out.push_str("}\n");
@@ -1435,11 +2018,20 @@ fn render_analysis_rmd(
         .collect::<Vec<String>>()
     })
     .unwrap_or_default();
-  let outcome = hint_or_default(&options.outcome_var_hint, "y");
-  let treatment = hint_or_default(&options.treatment_var_hint, "treat");
+  let hinted_outcome = hint_or_default(&options.outcome_var_hint, "y");
+  let treatment_hint = hint_or_default(&options.treatment_var_hint, "treat");
+  let treatment = primary_treatment_from_models(options, &treatment_hint);
+  let outcomes = model_outcomes(options, &hinted_outcome);
+  let outcome = outcomes.first().cloned().unwrap_or_else(|| hinted_outcome.clone());
   let id = hint_or_default(&options.id_var_hint, "id");
   let time = hint_or_default(&options.time_var_hint, "time");
-  let group = hint_or_default(&options.group_var_hint, "group");
+  let group_hint = options
+    .group_var_hint
+    .as_ref()
+    .map(|item| item.trim().to_string())
+    .filter(|item| !item.is_empty())
+    .unwrap_or_else(|| treatment.clone());
+  let group = primary_group_from_models(options, &group_hint);
 
   let mut out = String::new();
   out.push_str("---\n");
@@ -1473,11 +2065,41 @@ fn render_analysis_rmd(
   out.push_str("  library(ggpubr)\n");
   out.push_str("  library(flextable)\n");
   out.push_str("})\n\n");
-  out.push_str("# Source project style kit\n");
-  out.push_str("source(here::here(\"R/style/theme_plots.R\"))\n");
-  out.push_str("source(here::here(\"R/style/tables_flextable.R\"))\n");
-  out.push_str("source(here::here(\"R/style/style_init.R\"))\n\n");
-  out.push_str("cfg <- init_project_style()\n\n");
+  out.push_str("# Load project style package (preferred), fallback to sourced scripts\n");
+  out.push_str("style_pkg_name <- \"");
+  out.push_str(STYLE_PACKAGE_NAME);
+  out.push_str("\"\n");
+  out.push_str("style_pkg_root <- here::here(\"R\", \"");
+  out.push_str(STYLE_PACKAGE_NAME);
+  out.push_str("\")\n");
+  out.push_str("style_pkg_loaded <- requireNamespace(style_pkg_name, quietly = TRUE)\n");
+  out.push_str("if (!style_pkg_loaded && dir.exists(style_pkg_root) && requireNamespace(\"remotes\", quietly = TRUE)) {\n");
+  out.push_str("  tryCatch({\n");
+  out.push_str("    remotes::install_local(style_pkg_root, dependencies = FALSE, upgrade = \"never\", quiet = TRUE)\n");
+  out.push_str("    style_pkg_loaded <- requireNamespace(style_pkg_name, quietly = TRUE)\n");
+  out.push_str("  }, error = function(e) {\n");
+  out.push_str("    message(\"Style package install skipped: \", conditionMessage(e))\n");
+  out.push_str("  })\n");
+  out.push_str("}\n");
+  out.push_str("if (!style_pkg_loaded) {\n");
+  out.push_str("  source(here::here(\"R/style/theme_plots.R\"))\n");
+  out.push_str("  source(here::here(\"R/style/tables_flextable.R\"))\n");
+  out.push_str("  source(here::here(\"R/style/style_init.R\"))\n");
+  out.push_str("  cfg <- init_project_style()\n");
+  out.push_str("} else {\n");
+  out.push_str("  cfg <- getExportedValue(style_pkg_name, \"init_project_style\")()\n");
+  out.push_str("}\n\n");
+  out.push_str("# Bind plotting/table helpers from local style package when available\n");
+  out.push_str("if (style_pkg_loaded) {\n");
+  out.push_str("  style_exports <- c(\n");
+  out.push_str("    \"theme_apa\", \"set_apa_plot_defaults\", \"apa_scatter\", \"apa_hist\", \"apa_box\",\n");
+  out.push_str("    \"theme_study_plot\", \"style_box_plot\", \"style_bar_plot\",\n");
+  out.push_str("    \"ft_apa\", \"ft_apa_descriptives\", \"ft_apa_regression\", \"style_model_table\"\n");
+  out.push_str("  )\n");
+  out.push_str("  for (fn in style_exports) {\n");
+  out.push_str("    assign(fn, getExportedValue(style_pkg_name, fn), envir = .GlobalEnv)\n");
+  out.push_str("  }\n");
+  out.push_str("}\n\n");
   out.push_str(&format!(
     "output_dir <- {}\n",
     analysis_output_here_expr(project_root, study_root)
@@ -1527,13 +2149,13 @@ fn render_analysis_rmd(
   out.push_str("  mutate()\n");
   out.push_str("```\n\n");
 
-  out.push_str(&render_descriptives(options, &outcome, &group));
+  out.push_str(&render_descriptives(options, &outcomes, &treatment, &group));
   out.push_str(&render_balance_checks(options, &treatment));
   out.push_str(&render_models(options, &outcome, &treatment, &id, &time));
   out.push_str(&render_diagnostics(options));
   out.push_str(&render_robustness(options));
   out.push_str(&render_exploratory(options));
-  out.push_str(&render_exports(options));
+  out.push_str(&render_exports(options, &outcomes));
 
   out
 }
@@ -2818,9 +3440,21 @@ mod tests {
   }
 
   #[test]
-  fn render_includes_selected_models_only() {
+  fn render_requires_model_layouts_for_model_scaffolding() {
     let mut options = empty_options();
-    options.models = vec!["ols".to_string()];
+    options.model_layouts = vec![ModelLayout {
+      name: "OLS Main".to_string(),
+      model_type: "ols".to_string(),
+      outcome_var: "outcome_y".to_string(),
+      treatment_var: Some("treat_x".to_string()),
+      layout: "simple".to_string(),
+      interaction_var: None,
+      covariates: Some("cov1 + cov2".to_string()),
+      id_var: None,
+      time_var: None,
+      figures: vec!["coef_plot".to_string()],
+      include_in_main_table: true
+    }];
     let rendered = render_analysis_rmd(
       Path::new("project"),
       Path::new("project/studies/S-ABC123"),
@@ -2828,9 +3462,19 @@ mod tests {
       "Test Study",
       &options
     );
-    assert!(rendered.contains("## OLS"));
-    assert!(!rendered.contains("## Logistic"));
+    assert!(rendered.contains("## OLS Main (ols)"));
+    assert!(rendered.contains("outcome_y ~ treat_x + cov1 + cov2"));
+    assert!(rendered.contains("style_pkg_name <- \"researchworkflowstyle\""));
     assert!(rendered.contains("source(here::here(\"R/style/theme_plots.R\"))"));
+
+    let rendered_without_layouts = render_analysis_rmd(
+      Path::new("project"),
+      Path::new("project/studies/S-ABC123"),
+      "S-ABC123",
+      "Test Study",
+      &empty_options()
+    );
+    assert!(rendered_without_layouts.contains("Add at least one Model Layout in the model builder"));
   }
 
   #[test]
@@ -2887,6 +3531,11 @@ mod tests {
     assert!(base.join("R").join("style").join("tables_flextable.R").exists());
     assert!(base.join("R").join("style").join("style_init.R").exists());
     assert!(base.join("R").join("style").join("README.md").exists());
+    assert!(base.join("R").join("researchworkflowstyle").join("DESCRIPTION").exists());
+    assert!(base.join("R").join("researchworkflowstyle").join("NAMESPACE").exists());
+    assert!(base.join("R").join("researchworkflowstyle").join("R").join("plots.R").exists());
+    assert!(base.join("R").join("researchworkflowstyle").join("R").join("tables.R").exists());
+    assert!(base.join("R").join("researchworkflowstyle").join("R").join("init.R").exists());
 
     let merged_raw = fs::read_to_string(base.join("config").join("analysis_defaults.json"))
       .expect("config should be readable");
@@ -2906,6 +3555,13 @@ mod tests {
         .and_then(|v| v.get("path"))
         .and_then(|v| v.as_str()),
       Some("R/style")
+    );
+    assert_eq!(
+      merged
+        .get("stylePackage")
+        .and_then(|v| v.get("path"))
+        .and_then(|v| v.as_str()),
+      Some("R/researchworkflowstyle")
     );
 
     let _ = fs::remove_dir_all(base);
@@ -2999,7 +3655,7 @@ mod tests {
     );
     assert!(rendered.contains("models_y1.html"));
     assert!(rendered.contains("models_y2.html"));
-    assert!(rendered.contains("Main Figures by Outcome"));
+    assert!(rendered.contains("Main Figures by Model Builder Input"));
   }
 
 }
@@ -3033,7 +3689,15 @@ fn main() {
       remove_artifact,
       generate_osf_packages,
       git_status,
-      git_commit_push
+      git_commit_push,
+      list_build_assets,
+      list_prereg_assets,
+      parse_qsf,
+      parse_prereg,
+      generate_analysis_spec,
+      save_analysis_spec,
+      resolve_mappings,
+      render_analysis_from_spec
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

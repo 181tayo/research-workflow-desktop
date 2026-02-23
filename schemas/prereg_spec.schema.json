@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PreregSpec",
+  "type": "object",
+  "required": ["metadata", "variables", "mainAnalyses", "exploratoryAnalyses", "robustnessChecks", "exclusionRules", "derivedScales", "sections", "warnings"],
+  "properties": {
+    "metadata": {"type": "object"},
+    "variables": {"type": "object"},
+    "mainAnalyses": {"type": "array"},
+    "exploratoryAnalyses": {"type": "array"},
+    "robustnessChecks": {"type": "array", "items": {"type": "string"}},
+    "exclusionRules": {"type": "array"},
+    "derivedScales": {"type": "array"},
+    "missingDataPlan": {"type": ["string", "null"]},
+    "sections": {"type": "object"},
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  }
+}

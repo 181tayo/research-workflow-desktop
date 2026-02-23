@@ -1,0 +1,7 @@
+{
+  "SurveyEntry": {"SurveyName": "Example Survey"},
+  "SurveyElements": [
+    {"Element": "SQ", "Payload": {"QuestionID": "QID1", "DataExportTag": "dv_choice", "QuestionText": "Choose option", "QuestionType": {"Type": "MC"}, "Choices": {"1": {"Display": "A"}, "2": {"Display": "B"}}}},
+    {"Element": "BL", "Payload": {"Flow": [{"Type": "EmbeddedData", "EmbeddedData": [{"Field": "participant_id"}]}]}}
+  ]
+}

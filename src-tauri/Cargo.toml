@@ -22,6 +22,10 @@ tera = "1.20"
 sha2 = "0.10"
 zip = "0.6"
 strsim = "0.11"
+reqwest = { version = "0.11", default-features = false, features = ["json", "stream", "blocking", "rustls-tls"] }
+hex = "0.4"
+thiserror = "1.0"
+tokio = { version = "1", features = ["rt", "macros"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

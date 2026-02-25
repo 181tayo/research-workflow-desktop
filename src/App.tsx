@@ -47,6 +47,52 @@ type JsonStudy = {
   files?: FileRef[];
 };
 
+type ModelLock = {
+  locked: boolean;
+  tag: string;
+  assetName: string;
+  sha256: string;
+  lockedAtUtc: string;
+  note?: string | null;
+};
+
+type ModelStatus = {
+  loaded: boolean;
+  modelDir: string;
+  modelPath?: string | null;
+  updatePolicy: string;
+  selectedTag?: string | null;
+  assetName: string;
+  bytesOnDisk?: number | null;
+  sha256?: string | null;
+  sha256Ok?: boolean | null;
+  lastCheckedUtc?: string | null;
+  lastError?: string | null;
+  lock?: ModelLock | null;
+};
+
+type LlmSettings = {
+  modelDir: string;
+  updatePolicy: "stable" | "latest";
+  stableTag: string;
+  assetName: string;
+  stableSha256: string | null;
+  githubOwner: string;
+  githubRepo: string;
+  allowPrerelease: boolean;
+  autoCheckDays: number;
+};
+
+type LlmProjectPreset = {
+  name: string;
+  updatePolicy: "stable" | "latest";
+  stableTag: string;
+  assetName: string;
+  allowPrerelease: boolean;
+  autoCheckDays: number;
+  note?: string | null;
+};
+
 type LegacyStudy = {
   id: string;
   projectId: string;
@@ -76,6 +122,13 @@ type RootDirInfo = {
   isGitRepo: boolean;
 };
 
+type SentenceExtraction = {
+  dv: string;
+  iv: string[];
+  controls: string[];
+  ambiguities: string[];
+};
+
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -101,6 +154,8 @@ export default function App() {
     null
   );
   const [isProjectSettingsOpen, setIsProjectSettingsOpen] = useState(false);
+  const [projectSettingsTab, setProjectSettingsTab] = useState<"general" | "advanced">("general");
+  const [advancedTab, setAdvancedTab] = useState<"reproducibility">("reproducibility");
   const [projectRootEdit, setProjectRootEdit] = useState("");
   const [projectRootEditInfo, setProjectRootEditInfo] = useState<RootDirInfo | null>(
     null
@@ -123,6 +178,12 @@ export default function App() {
     projectId: string;
     studyId: string;
   } | null>(null);
+  const [analysisHubTab, setAnalysisHubTab] = useState<"manual" | "inputs" | "sentence">("manual");
+  const [sentenceModelText, setSentenceModelText] = useState("");
+  const [sentenceExtraction, setSentenceExtraction] = useState<SentenceExtraction | null>(null);
+  const [sentenceDvOverride, setSentenceDvOverride] = useState("");
+  const [sentenceIvOverride, setSentenceIvOverride] = useState("");
+  const [sentenceControlsOverride, setSentenceControlsOverride] = useState("");
   const [isRemoveAnalysisModalOpen, setIsRemoveAnalysisModalOpen] = useState(false);
   const [removeAnalysisTarget, setRemoveAnalysisTarget] = useState<{
     projectId: string;
@@ -137,6 +198,25 @@ export default function App() {
     name?: string;
     root?: string;
   }>({});
+  const [llmSettings, setLlmSettings] = useState<LlmSettings | null>(null);
+  const [llmProjectLockDraft, setLlmProjectLockDraft] = useState<ModelLock>({
+    locked: true,
+    tag: "",
+    assetName: "",
+    sha256: "",
+    lockedAtUtc: "",
+    note: null,
+  });
+  const [llmResolvedModel, setLlmResolvedModel] = useState<ModelStatus | null>(null);
+  const [llmProjectPreset, setLlmProjectPreset] = useState<LlmProjectPreset>({
+    name: "Reproducible Stable",
+    updatePolicy: "stable",
+    stableTag: "",
+    assetName: "model.gguf",
+    allowPrerelease: false,
+    autoCheckDays: 1,
+    note: null,
+  });
 
   const selectedProject = useMemo(
     () => projects.find((p) => p.id === selectedProjectId) ?? null,
@@ -176,7 +256,9 @@ export default function App() {
         setLoading(true);
         await invoke("init_db");
         const list = await invoke<Project[]>("list_projects");
+        const settings = await invoke<LlmSettings>("llm_get_settings");
         setProjects(list);
+        setLlmSettings(settings);
       } catch (err) {
         setError(String(err));
       } finally {
@@ -274,17 +356,156 @@ export default function App() {
     setIsProjectModalOpen(false);
   };
 
-  const openProjectSettings = () => {
+  const openProjectSettings = async () => {
     if (!selectedProject) return;
-    setProjectRootEdit(selectedProject.rootPath);
-    setProjectRootEditError(null);
-    setProjectRootEditInfo(null);
-    setDeleteProjectOnDisk(false);
-    setIsProjectSettingsOpen(true);
+    try {
+      setLoading(true);
+      setProjectRootEdit(selectedProject.rootPath);
+      setProjectRootEditError(null);
+      setProjectRootEditInfo(null);
+      setDeleteProjectOnDisk(false);
+      setProjectSettingsTab("general");
+      setAdvancedTab("reproducibility");
+      const settings = await invoke<LlmSettings>("llm_get_settings");
+      setLlmSettings(settings);
+      const lock = await invoke<ModelLock | null>("llm_get_project_lock", {
+        projectRoot: selectedProject.rootPath,
+      });
+      setLlmProjectLockDraft(
+        lock ?? { locked: true, tag: "", assetName: "", sha256: "", lockedAtUtc: "", note: null }
+      );
+      const preset = await invoke<LlmProjectPreset | null>("llm_get_project_preset", {
+        projectRoot: selectedProject.rootPath,
+      });
+      if (preset) {
+        setLlmProjectPreset(preset);
+      } else {
+        setLlmProjectPreset((prev) => ({
+          ...prev,
+          stableTag: settings.stableTag || prev.stableTag,
+          assetName: settings.assetName || prev.assetName,
+          allowPrerelease: settings.allowPrerelease,
+          autoCheckDays: settings.autoCheckDays,
+        }));
+      }
+      setIsProjectSettingsOpen(true);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
   };
 
   const closeProjectSettings = () => {
     setIsProjectSettingsOpen(false);
+  };
+
+  const handleSaveProjectPreset = async () => {
+    if (!selectedProject) return;
+    try {
+      setLoading(true);
+      const saved = await invoke<LlmProjectPreset>("llm_set_project_preset", {
+        projectRoot: selectedProject.rootPath,
+        preset: llmProjectPreset,
+      });
+      setLlmProjectPreset(saved);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleApplyProjectPreset = async () => {
+    if (!selectedProject) return;
+    try {
+      setLoading(true);
+      const saved = await invoke<LlmProjectPreset>("llm_set_project_preset", {
+        projectRoot: selectedProject.rootPath,
+        preset: llmProjectPreset,
+      });
+      setLlmProjectPreset(saved);
+      const settings = await invoke<LlmSettings>("llm_apply_project_preset", {
+        projectRoot: selectedProject.rootPath,
+      });
+      setLlmSettings(settings);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResolveLlmModel = async () => {
+    if (!selectedProject) return;
+    try {
+      setLoading(true);
+      const model = await invoke<ModelStatus>("llm_download_model_if_needed", {
+        projectRoot: selectedProject.rootPath,
+      });
+      setLlmResolvedModel(model);
+    } catch (err) {
+      setError(String(err));
+      setLlmResolvedModel(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleLockProjectToCurrentModel = async () => {
+    if (!selectedProject) return;
+    try {
+      setLoading(true);
+      const lock = await invoke<ModelLock>("llm_lock_project_to_current_model", {
+        projectRoot: selectedProject.rootPath,
+        note: llmProjectLockDraft.note ?? null,
+      });
+      setLlmProjectLockDraft(lock);
+      setLlmResolvedModel(await invoke<ModelStatus>("llm_get_model_status", {
+        projectRoot: selectedProject.rootPath,
+      }));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUnlockProject = async () => {
+    if (!selectedProject) return;
+    try {
+      setLoading(true);
+      await invoke("llm_unlock_project", { projectRoot: selectedProject.rootPath });
+      setLlmProjectLockDraft({ locked: true, tag: "", assetName: "", sha256: "", lockedAtUtc: "", note: null });
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleVerifyLlmModel = async () => {
+    if (!selectedProject) return;
+    try {
+      setLoading(true);
+      setLlmResolvedModel(await invoke<ModelStatus>("llm_verify_model", { projectRoot: selectedProject.rootPath }));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleLoadLlmModel = async () => {
+    if (!selectedProject) return;
+    try {
+      setLoading(true);
+      setLlmResolvedModel(await invoke<ModelStatus>("llm_load_model_from_disk", { projectRoot: selectedProject.rootPath }));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handlePickProjectRoot = async () => {
@@ -817,6 +1038,12 @@ export default function App() {
 
   const openInputAnalysisModal = (projectId: string, studyId: string) => {
     setError(null);
+    setAnalysisHubTab("manual");
+    setSentenceModelText("");
+    setSentenceExtraction(null);
+    setSentenceDvOverride("");
+    setSentenceIvOverride("");
+    setSentenceControlsOverride("");
     setInputAnalysisTarget({ projectId, studyId });
     setIsInputAnalysisModalOpen(true);
   };
@@ -876,6 +1103,84 @@ export default function App() {
   const closeInputAnalysisModal = () => {
     setIsInputAnalysisModalOpen(false);
     setInputAnalysisTarget(null);
+  };
+
+  const handleExtractSentenceModel = async () => {
+    if (!selectedProject || !sentenceModelText.trim()) return;
+    try {
+      setLoading(true);
+      const raw = await invoke<string>("llm_extract_model_spec", {
+        text: sentenceModelText.trim(),
+        qsfContextJson: "{}",
+        projectRoot: selectedProject.rootPath
+      });
+      const parsed = JSON.parse(raw);
+      const extracted = (parsed?.extracted ?? {}) as Partial<SentenceExtraction>;
+      const next: SentenceExtraction = {
+        dv: String(extracted.dv ?? "").trim(),
+        iv: Array.isArray(extracted.iv) ? extracted.iv.map((v) => String(v).trim()).filter(Boolean) : [],
+        controls: Array.isArray(extracted.controls) ? extracted.controls.map((v) => String(v).trim()).filter(Boolean) : [],
+        ambiguities: Array.isArray(extracted.ambiguities) ? extracted.ambiguities.map((v) => String(v)) : []
+      };
+      setSentenceExtraction(next);
+      setSentenceDvOverride(next.dv);
+      setSentenceIvOverride(next.iv.join(", "));
+      setSentenceControlsOverride(next.controls.join(", "));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUseSentenceInBuilder = () => {
+    if (!inputAnalysisTarget) return;
+    const dv = sentenceDvOverride.trim();
+    const iv = sentenceIvOverride
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean);
+    const controls = sentenceControlsOverride
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean);
+    if (!dv || iv.length === 0) {
+      setError("Please specify at least one DV and one IV.");
+      return;
+    }
+
+    const prefill: Partial<AnalysisTemplateOptions> = {
+      analysisFileName: "analysis",
+      outcomeVarHint: dv,
+      treatmentVarHint: iv[0],
+      groupVarHint: iv[1] ?? "group",
+      descriptives: ["summary_stats"],
+      plots: ["coef_plot"],
+      balanceChecks: [],
+      models: ["ols"],
+      diagnostics: [],
+      tables: ["model_table"],
+      robustness: [],
+      modelLayouts: [
+        {
+          name: "sentence_model",
+          modelType: "ols",
+          outcomeVar: dv,
+          treatmentVar: iv[0],
+          layout: "simple",
+          interactionVar: "",
+          covariates: controls.join(", "),
+          idVar: "id",
+          timeVar: "time",
+          figures: ["coef_plot"],
+          includeInMainTable: true
+        }
+      ],
+      exploratory: false,
+      exportArtifacts: true
+    };
+    closeInputAnalysisModal();
+    openAnalysisModal(inputAnalysisTarget.projectId, inputAnalysisTarget.studyId, prefill);
   };
 
   const handleRemoveFile = async (path: string) => {
@@ -1041,24 +1346,12 @@ export default function App() {
                       onClick={(event) => {
                         event.stopPropagation();
                         if (selectedProjectId) {
-                          openAnalysisModal(selectedProjectId, study.id);
-                        }
-                      }}
-                      disabled={!selectedProjectId}
-                    >
-                      Add analysis
-                    </button>
-                    <button
-                      className="list-action"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        if (selectedProjectId) {
                           openInputAnalysisModal(selectedProjectId, study.id);
                         }
                       }}
                       disabled={!selectedProjectId}
                     >
-                      Add analysis (inputs)
+                      Add analysis
                     </button>
                     <button
                       className="list-action ghost"
@@ -1449,24 +1742,103 @@ export default function App() {
         <div className="modal-backdrop" onClick={closeInputAnalysisModal}>
           <div className="modal" onClick={(event) => event.stopPropagation()}>
             <div className="modal-header">
-              <h2>Create Analysis From Inputs</h2>
+              <h2>Add Analysis</h2>
               <button className="ghost" onClick={closeInputAnalysisModal}>
                 Close
               </button>
             </div>
             <div className="modal-body">
-              <AnalysisCreateFromInputs
-                projectId={inputAnalysisTarget.projectId}
-                studyId={inputAnalysisTarget.studyId}
-                onUseInBuilder={(prefill) => {
-                  closeInputAnalysisModal();
-                  openAnalysisModal(
-                    inputAnalysisTarget.projectId,
-                    inputAnalysisTarget.studyId,
-                    prefill
-                  );
-                }}
-              />
+              <div className="tabs">
+                <button
+                  className={analysisHubTab === "manual" ? "active" : ""}
+                  onClick={() => setAnalysisHubTab("manual")}
+                >
+                  Manual Builder
+                </button>
+                <button
+                  className={analysisHubTab === "inputs" ? "active" : ""}
+                  onClick={() => setAnalysisHubTab("inputs")}
+                >
+                  Preload From Prereg + QSF
+                </button>
+                <button
+                  className={analysisHubTab === "sentence" ? "active" : ""}
+                  onClick={() => setAnalysisHubTab("sentence")}
+                >
+                  Build From Sentence
+                </button>
+              </div>
+
+              {analysisHubTab === "manual" && (
+                <div>
+                  <p className="muted">Build manually using the existing model builder inputs.</p>
+                  <button
+                    onClick={() => {
+                      closeInputAnalysisModal();
+                      openAnalysisModal(inputAnalysisTarget.projectId, inputAnalysisTarget.studyId);
+                    }}
+                  >
+                    Open Model Builder
+                  </button>
+                </div>
+              )}
+
+              {analysisHubTab === "inputs" && (
+                <AnalysisCreateFromInputs
+                  projectId={inputAnalysisTarget.projectId}
+                  studyId={inputAnalysisTarget.studyId}
+                  onUseInBuilder={(prefill) => {
+                    closeInputAnalysisModal();
+                    openAnalysisModal(
+                      inputAnalysisTarget.projectId,
+                      inputAnalysisTarget.studyId,
+                      prefill
+                    );
+                  }}
+                />
+              )}
+
+              {analysisHubTab === "sentence" && (
+                <div>
+                  <p className="muted">
+                    Type your model in plain English (example: "Predict trust from treatment + age + gender").
+                  </p>
+                  <textarea
+                    value={sentenceModelText}
+                    onChange={(e) => setSentenceModelText(e.target.value)}
+                    placeholder="Predict outcome_y from treat_x + age + baseline"
+                  />
+                  <div className="inline-actions">
+                    <button disabled={!sentenceModelText.trim()} onClick={handleExtractSentenceModel}>
+                      Extract Model
+                    </button>
+                  </div>
+                  {sentenceExtraction && (
+                    <div>
+                      <h4>Review Extracted Model</h4>
+                      {sentenceExtraction.ambiguities.length > 0 && (
+                        <div>
+                          <p className="muted">Please resolve these items:</p>
+                          <ul className="list">
+                            {sentenceExtraction.ambiguities.map((item, idx) => (
+                              <li key={`amb-${idx}`}><span>{item}</span></li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      <label>Dependent variable (DV)</label>
+                      <input value={sentenceDvOverride} onChange={(e) => setSentenceDvOverride(e.target.value)} />
+                      <label>Independent variable(s), comma-separated</label>
+                      <input value={sentenceIvOverride} onChange={(e) => setSentenceIvOverride(e.target.value)} />
+                      <label>Controls (optional), comma-separated</label>
+                      <input value={sentenceControlsOverride} onChange={(e) => setSentenceControlsOverride(e.target.value)} />
+                      <button onClick={handleUseSentenceInBuilder}>
+                        Use In Model Builder
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1523,28 +1895,151 @@ export default function App() {
               </button>
             </div>
             <div className="modal-body">
-              <p className="muted">Project: {selectedProject.name}</p>
-              <label>Root Folder</label>
-              <div className="inline-field">
-                <input value={projectRootEdit} readOnly />
-                <button onClick={handlePickProjectRootEdit}>Choose</button>
+              <div className="tabs">
+                <button
+                  className={projectSettingsTab === "general" ? "active" : ""}
+                  onClick={() => setProjectSettingsTab("general")}
+                >
+                  General
+                </button>
+                <button
+                  className={projectSettingsTab === "advanced" ? "active" : ""}
+                  onClick={() => setProjectSettingsTab("advanced")}
+                >
+                  Advanced
+                </button>
               </div>
-              {projectRootEditError && (
-                <p className="field-error">{projectRootEditError}</p>
+              {projectSettingsTab === "general" && (
+                <>
+                  <p className="muted">Project: {selectedProject.name}</p>
+                  <label>Root Folder</label>
+                  <div className="inline-field">
+                    <input value={projectRootEdit} readOnly />
+                    <button onClick={handlePickProjectRootEdit}>Choose</button>
+                  </div>
+                  {projectRootEditError && (
+                    <p className="field-error">{projectRootEditError}</p>
+                  )}
+                  {(projectRootEditInfo?.isGitRepo ||
+                    selectedRootInfo?.isGitRepo) && (
+                    <p className="muted">Git repo detected in selected folder.</p>
+                  )}
+                  <label>Delete Options</label>
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={deleteProjectOnDisk}
+                      onChange={(event) => setDeleteProjectOnDisk(event.target.checked)}
+                    />
+                    Also delete the project folder on disk
+                  </label>
+                </>
               )}
-              {(projectRootEditInfo?.isGitRepo ||
-                selectedRootInfo?.isGitRepo) && (
-                <p className="muted">Git repo detected in selected folder.</p>
+              {projectSettingsTab === "advanced" && (
+                <>
+                  <div className="tabs">
+                    <button
+                      className={advancedTab === "reproducibility" ? "active" : ""}
+                      onClick={() => setAdvancedTab("reproducibility")}
+                    >
+                      Reproducibility
+                    </button>
+                  </div>
+                  {advancedTab === "reproducibility" && llmSettings && (
+                    <>
+                      <p className="muted">Save and reuse a preset so users do not need to tune advanced knobs each time.</p>
+                      <label>Preset Name</label>
+                      <input
+                        value={llmProjectPreset.name}
+                        onChange={(e) =>
+                          setLlmProjectPreset((prev) => ({ ...prev, name: e.target.value }))
+                        }
+                      />
+                      <label>Update Policy</label>
+                      <select
+                        value={llmProjectPreset.updatePolicy}
+                        onChange={(e) =>
+                          setLlmProjectPreset((prev) => ({
+                            ...prev,
+                            updatePolicy: e.target.value as "stable" | "latest",
+                          }))
+                        }
+                      >
+                        <option value="stable">Stable (recommended, reproducible)</option>
+                        <option value="latest">Most up to date (may change behavior)</option>
+                      </select>
+                      <label>Stable Tag</label>
+                      <input
+                        value={llmProjectPreset.stableTag}
+                        onChange={(e) =>
+                          setLlmProjectPreset((prev) => ({ ...prev, stableTag: e.target.value }))
+                        }
+                      />
+                      <label>Asset Name</label>
+                      <input
+                        value={llmProjectPreset.assetName}
+                        onChange={(e) =>
+                          setLlmProjectPreset((prev) => ({ ...prev, assetName: e.target.value }))
+                        }
+                      />
+                      <label className="checkbox">
+                        <input
+                          type="checkbox"
+                          checked={llmProjectPreset.allowPrerelease}
+                          onChange={(e) =>
+                            setLlmProjectPreset((prev) => ({ ...prev, allowPrerelease: e.target.checked }))
+                          }
+                        />
+                        Allow prerelease
+                      </label>
+                      <label>Auto Check Days</label>
+                      <input
+                        type="number"
+                        min={1}
+                        value={llmProjectPreset.autoCheckDays}
+                        onChange={(e) =>
+                          setLlmProjectPreset((prev) => ({
+                            ...prev,
+                            autoCheckDays: Math.max(1, Number(e.target.value || "1")),
+                          }))
+                        }
+                      />
+                      <div className="inline-actions">
+                        <button onClick={handleSaveProjectPreset}>Save Preset</button>
+                        <button onClick={handleApplyProjectPreset}>Apply Preset</button>
+                      </div>
+                      <div className="divider" />
+                      <h3>Project Lock</h3>
+                      <p className="muted">
+                        {llmProjectLockDraft.tag
+                          ? `Locked to ${llmProjectLockDraft.tag} (${llmProjectLockDraft.sha256})`
+                          : "Not locked"}
+                      </p>
+                      <div className="inline-actions">
+                        <button onClick={handleLockProjectToCurrentModel}>Lock This Project To Current Model</button>
+                        <button className="ghost" onClick={handleUnlockProject}>Unlock Project</button>
+                      </div>
+                      {llmProjectPreset.updatePolicy === "latest" && (
+                        <p className="muted">
+                          Latest may change extraction results. Lock this project for reproducibility.
+                        </p>
+                      )}
+                      <div className="divider" />
+                      <h3>Local AI Model Status</h3>
+                      <div className="inline-actions">
+                        <button onClick={handleResolveLlmModel}>Download/Update</button>
+                        <button onClick={handleVerifyLlmModel}>Verify</button>
+                        <button onClick={handleLoadLlmModel}>Load</button>
+                      </div>
+                      {llmResolvedModel && (
+                        <p className="muted">
+                          Tag: {llmResolvedModel.selectedTag ?? "(none)"} | SHA: {llmResolvedModel.sha256 ?? "(none)"} | Loaded: {String(llmResolvedModel.loaded)}
+                        </p>
+                      )}
+                    </>
+                  )}
+                </>
               )}
-              <label>Delete Options</label>
-              <label className="checkbox">
-                <input
-                  type="checkbox"
-                  checked={deleteProjectOnDisk}
-                  onChange={(event) => setDeleteProjectOnDisk(event.target.checked)}
-                />
-                Also delete the project folder on disk
-              </label>
             </div>
             <div className="modal-actions">
               <button className="ghost" onClick={closeProjectSettings}>

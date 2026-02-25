@@ -2,6 +2,16 @@
 title: "Analysis"
 output: html_document
 ---
+{% if spec.modelProvenance %}
+<!--
+LLM Provenance:
+- model_tag: {{ spec.modelProvenance.modelTag }}
+- asset: {{ spec.modelProvenance.asset }}
+- sha256: {{ spec.modelProvenance.sha256 }}
+- locked: {{ spec.modelProvenance.locked }}
+- locked_at_utc: {{ spec.modelProvenance.lockedAtUtc | default(value="") }}
+-->
+{% endif %}
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)

@@ -1,3 +1,4 @@
+use regex::Regex;
 use std::path::PathBuf;
 use tauri::AppHandle;
 
@@ -252,11 +253,109 @@ pub fn llm_extract_prereg_models(
 ) -> Result<String, String> {
     let status = llm_load_model_from_disk(app, project_root)?;
     let provenance = model_provenance_from_status(&status);
+
+    let qsf_vars = parse_qsf_variables(&qsf_context_json);
+    let lower = doc_text.to_lowercase();
+
+    let mut main_models = Vec::<serde_json::Value>::new();
+    let mut exploratory_models = Vec::<serde_json::Value>::new();
+    let mut mechanism_models = Vec::<serde_json::Value>::new();
+    let mut robustness_checks = Vec::<String>::new();
+    let mut ambiguities = Vec::<String>::new();
+
+    let formula_re = Regex::new(r"(?m)([A-Za-z][A-Za-z0-9_]*)\s*~\s*([A-Za-z0-9_ +:*.-]+)")
+        .map_err(|e| format!("Regex error: {e}"))?;
+
+    for (idx, cap) in formula_re.captures_iter(&doc_text).enumerate() {
+        let dv = cap
+            .get(1)
+            .map(|m| m.as_str().trim())
+            .unwrap_or("")
+            .to_string();
+        let rhs = cap
+            .get(2)
+            .map(|m| m.as_str().trim())
+            .unwrap_or("")
+            .to_string();
+        let iv_raw = rhs
+            .split('+')
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .collect::<Vec<String>>();
+        let iv = iv_raw
+            .iter()
+            .map(|v| match_qsf_var(v, &qsf_vars).unwrap_or_else(|| v.to_string()))
+            .collect::<Vec<String>>();
+        let dv_mapped = match_qsf_var(&dv, &qsf_vars).unwrap_or(dv.clone());
+        let model = serde_json::json!({
+          "id": format!("llm_m{}", idx + 1),
+          "dv": dv_mapped,
+          "iv": iv,
+          "controls": [],
+          "interactionTerms": extract_interactions(&rhs),
+          "formula": format!("{dv} ~ {rhs}")
+        });
+
+        if rhs.contains("mediat") || rhs.contains("mechanis") {
+            mechanism_models.push(model);
+        } else if rhs.contains("explor")
+            || rhs.contains("secondary")
+            || lower.contains("exploratory")
+        {
+            exploratory_models.push(model);
+        } else {
+            main_models.push(model);
+        }
+    }
+
+    if lower.contains("robust") || lower.contains("sensitivity") {
+        robustness_checks.push("with_without_controls".to_string());
+    }
+    if lower.contains("without controls") || lower.contains("with and without controls") {
+        robustness_checks.push("with_without_controls".to_string());
+    }
+    robustness_checks.sort();
+    robustness_checks.dedup();
+
+    if main_models.is_empty() && exploratory_models.is_empty() && mechanism_models.is_empty() {
+        ambiguities.push(
+            "No explicit model formula found (expected patterns like y ~ x + c).".to_string(),
+        );
+    }
+
+    let mediators = qsf_vars
+        .iter()
+        .filter(|v| v.to_lowercase().contains("mediat") || v.to_lowercase().contains("mechanis"))
+        .cloned()
+        .collect::<Vec<String>>();
+    let moderators = qsf_vars
+        .iter()
+        .filter(|v| v.to_lowercase().contains("moderat") || v.to_lowercase().contains("interact"))
+        .cloned()
+        .collect::<Vec<String>>();
+    let exploratory_vars = qsf_vars
+        .iter()
+        .filter(|v| v.to_lowercase().contains("explor"))
+        .cloned()
+        .collect::<Vec<String>>();
+
     Ok(serde_json::json!({
       "kind": "prereg_models",
-      "docText": doc_text,
+      "docTextPreview": doc_text.chars().take(600).collect::<String>(),
       "qsfContextJson": qsf_context_json,
       "model": provenance,
+      "parsed": {
+        "mainModels": main_models,
+        "exploratoryModels": exploratory_models,
+        "mechanismModels": mechanism_models,
+        "robustnessChecks": robustness_checks,
+        "variables": {
+          "mediators": mediators,
+          "moderators": moderators,
+          "exploratory": exploratory_vars
+        },
+        "ambiguities": ambiguities
+      }
     })
     .to_string())
 }
@@ -277,4 +376,40 @@ pub fn llm_map_to_qsf(
       "model": provenance,
     })
     .to_string())
+}
+
+fn parse_qsf_variables(qsf_context_json: &str) -> Vec<String> {
+    let parsed = serde_json::from_str::<serde_json::Value>(qsf_context_json).ok();
+    let cols = parsed
+        .as_ref()
+        .and_then(|v| v.get("expectedColumns"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    cols.into_iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .filter(|s| !s.trim().is_empty())
+        .collect()
+}
+
+fn match_qsf_var(candidate: &str, qsf_vars: &[String]) -> Option<String> {
+    let c = candidate.trim().to_lowercase();
+    if c.is_empty() {
+        return None;
+    }
+    if let Some(exact) = qsf_vars.iter().find(|v| v.eq_ignore_ascii_case(&c)) {
+        return Some(exact.clone());
+    }
+    qsf_vars
+        .iter()
+        .find(|v| v.to_lowercase().contains(&c) || c.contains(&v.to_lowercase()))
+        .cloned()
+}
+
+fn extract_interactions(rhs: &str) -> Vec<String> {
+    rhs.split('+')
+        .map(|v| v.trim())
+        .filter(|v| v.contains(':') || v.contains('*'))
+        .map(|v| v.replace('*', ":"))
+        .collect()
 }

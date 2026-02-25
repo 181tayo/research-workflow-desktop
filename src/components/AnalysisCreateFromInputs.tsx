@@ -37,6 +37,7 @@ export function AnalysisCreateFromInputs({ projectId, studyId, onUseInBuilder }:
   const [selectedIvs, setSelectedIvs] = useState<string[]>([]);
   const [selectedControls, setSelectedControls] = useState<string[]>([]);
   const [templateChoice, setTemplateChoice] = useState<"auto" | "factorial_2x2" | "simple_ols">("auto");
+  const [timing, setTiming] = useState<Array<{ phase: string; ms: number }>>([]);
 
   useEffect(() => {
     listBuildAssets(projectId, studyId).then(setBuildAssets).catch(() => setBuildAssets([]));
@@ -49,6 +50,10 @@ export function AnalysisCreateFromInputs({ projectId, studyId, onUseInBuilder }:
   const onCreate = async () => {
     try {
       setStatus("Generating mapping + model suggestions...");
+      setTiming([]);
+      const t0 = performance.now();
+      let t1 = t0;
+      let t2 = t0;
       const generated: any = await generateAnalysisSpec({
         projectId,
         studyId,
@@ -58,6 +63,7 @@ export function AnalysisCreateFromInputs({ projectId, studyId, onUseInBuilder }:
         templateSet: "apa_v1",
         styleProfile: "apa_flextable_ggpubr"
       });
+      t1 = performance.now();
       setSpec(generated);
       setAnalysisSpec(generated);
 
@@ -76,8 +82,19 @@ export function AnalysisCreateFromInputs({ projectId, studyId, onUseInBuilder }:
       setSelectedIvs(seeded.iv);
       setSelectedControls(seeded.controls);
       setTemplateChoice((generated?.models?.main?.length ?? 0) > 0 ? "auto" : "factorial_2x2");
-
-      setStatus("Review mappings and plan, then continue to model builder.");
+      t2 = performance.now();
+      const extractedWarning = Array.isArray(generated?.warnings)
+        ? generated.warnings.find((w: any) => w?.code === "LLM_ENRICHMENT_APPLIED")
+        : null;
+      setTiming([
+        { phase: "Backend generation (includes model resolve/load + LLM extraction)", ms: Math.round(t1 - t0) },
+        { phase: "UI mapping + prefill", ms: Math.round(t2 - t1) }
+      ]);
+      setStatus(
+        extractedWarning
+          ? "LLM-assisted suggestions generated. Review mappings and continue."
+          : "Suggestions generated. Review mappings and continue."
+      );
     } catch (err) {
       setStatus(`Error: ${formatError(err)}`);
     }
@@ -133,6 +150,15 @@ export function AnalysisCreateFromInputs({ projectId, studyId, onUseInBuilder }:
       </select>
       <button onClick={onCreate} disabled={!qsfPath || !preregPath}>Build Suggestions</button>
       <p>{status}</p>
+      {timing.length > 0 && (
+        <ul className="list">
+          {timing.map((item) => (
+            <li key={item.phase}>
+              <span>{item.phase}: {item.ms} ms</span>
+            </li>
+          ))}
+        </ul>
+      )}
 
       {spec && <WarningsPanel warnings={spec.warnings ?? []} />}
 

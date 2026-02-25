@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use crate::commands::assets::{
     read_file_bytes, read_file_text, resolve_project_root, resolve_study_root,
 };
+use crate::llm::commands::llm_extract_prereg_models;
 use crate::llm::model_manager::{
     download_model_with_policy, model_provenance_from_status, read_project_lock,
 };
@@ -134,6 +135,21 @@ pub fn generate_analysis_spec(
         qsf_path: args.qsf_path.clone(),
         candidate_tokens: inferred_tokens,
     })?;
+    let prereg_text = read_file_text(&args.prereg_path).unwrap_or_else(|_| String::new());
+    let project_root = resolve_project_root(&_app, &args.project_id)?;
+    let qsf_context_for_llm = serde_json::json!({
+      "expectedColumns": qsf.expected_columns,
+      "labelMap": qsf.label_map
+    })
+    .to_string();
+    let llm_output = llm_extract_prereg_models(
+        _app.clone(),
+        prereg_text,
+        qsf_context_for_llm,
+        Some(project_root.to_string_lossy().to_string()),
+    )?;
+    let mut prereg_for_build = prereg.clone();
+    apply_llm_prereg_enrichment(&mut prereg_for_build, &llm_output);
 
     let mut spec = build_analysis_spec(
         &args.project_id,
@@ -144,18 +160,147 @@ pub fn generate_analysis_spec(
         &qsf_bytes,
         &prereg_bytes,
         &qsf,
-        &prereg,
+        &prereg_for_build,
         &args.template_set,
         &args.style_profile,
     );
     if let Ok(saved) = load_saved_spec(&_app, &args.project_id, &args.study_id, &args.analysis_id) {
         apply_saved_mappings(&mut spec, &saved);
     }
-    let project_root = resolve_project_root(&_app, &args.project_id)?;
     let model_status = download_model_with_policy(&_app, Some(project_root), false)?;
     spec.model_provenance = model_provenance_from_status(&model_status);
     spec.model_lock = model_status.lock.clone();
+    spec.warnings.push(crate::spec::types::WarningItem {
+        code: "LLM_ENRICHMENT_APPLIED".to_string(),
+        message: "LLM extraction enrichment applied to prereg parsing.".to_string(),
+        details: serde_json::json!({}),
+    });
     Ok(spec)
+}
+
+fn apply_llm_prereg_enrichment(prereg: &mut PreregSpec, llm_output_json: &str) {
+    let parsed = serde_json::from_str::<serde_json::Value>(llm_output_json).ok();
+    let parsed_ref = parsed
+        .as_ref()
+        .and_then(|v| v.get("parsed"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let map_models = |items: &serde_json::Value| -> Vec<crate::prereg::types::AnalysisModelSpec> {
+        items
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|item| {
+                let id = item.get("id")?.as_str()?.to_string();
+                let dv = item.get("dv")?.as_str()?.to_string();
+                let iv = item
+                    .get("iv")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect::<Vec<String>>()
+                    })
+                    .unwrap_or_default();
+                let controls = item
+                    .get("controls")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect::<Vec<String>>()
+                    })
+                    .unwrap_or_default();
+                let interaction_terms = item
+                    .get("interactionTerms")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect::<Vec<String>>()
+                    })
+                    .unwrap_or_default();
+                let formula = item
+                    .get("formula")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                Some(crate::prereg::types::AnalysisModelSpec {
+                    id,
+                    dv,
+                    iv,
+                    controls,
+                    interaction_terms,
+                    formula,
+                })
+            })
+            .collect()
+    };
+
+    let llm_main = map_models(
+        parsed_ref
+            .get("mainModels")
+            .unwrap_or(&serde_json::Value::Null),
+    );
+    if !llm_main.is_empty() {
+        prereg.main_analyses = llm_main;
+    }
+    let llm_expl = map_models(
+        parsed_ref
+            .get("exploratoryModels")
+            .unwrap_or(&serde_json::Value::Null),
+    );
+    if !llm_expl.is_empty() {
+        prereg.exploratory_analyses = llm_expl;
+    }
+    let llm_mech = map_models(
+        parsed_ref
+            .get("mechanismModels")
+            .unwrap_or(&serde_json::Value::Null),
+    );
+    if !llm_mech.is_empty() {
+        prereg
+            .exploratory_analyses
+            .extend(llm_mech.into_iter().map(|mut m| {
+                if m.id.is_empty() {
+                    m.id = "llm_mechanism".to_string();
+                }
+                m
+            }));
+    }
+
+    if let Some(arr) = parsed_ref
+        .get("robustnessChecks")
+        .and_then(|v| v.as_array())
+    {
+        prereg.robustness_checks = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+
+    if let Some(vars) = parsed_ref.get("variables") {
+        if let Some(mediators) = vars.get("mediators").and_then(|v| v.as_array()) {
+            prereg.variables.mediators = mediators
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+        if let Some(moderators) = vars.get("moderators").and_then(|v| v.as_array()) {
+            prereg.variables.moderators = moderators
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+    }
+
+    if let Some(amb) = parsed_ref.get("ambiguities").and_then(|v| v.as_array()) {
+        prereg.warnings.extend(
+            amb.iter()
+                .filter_map(|v| v.as_str().map(|s| format!("LLM_AMBIGUITY: {s}"))),
+        );
+    }
 }
 
 fn collect_candidate_tokens_from_prereg(prereg: &PreregSpec) -> Vec<String> {

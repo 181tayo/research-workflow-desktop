@@ -436,6 +436,48 @@ export default function App() {
     }
   };
 
+  const splitPath = (value: string) => {
+    const normalized = value.replace(/\\/g, "/");
+    const idx = normalized.lastIndexOf("/");
+    if (idx < 0) {
+      return { dir: "", file: normalized };
+    }
+    return {
+      dir: normalized.slice(0, idx),
+      file: normalized.slice(idx + 1)
+    };
+  };
+
+  const handlePickLocalModelFile = async () => {
+    if (!selectedProject || !llmSettings) return;
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        title: "Select local GGUF model file"
+      });
+      if (typeof selected !== "string") return;
+      const { dir, file } = splitPath(selected);
+      if (!file) {
+        setError("Invalid model file path.");
+        return;
+      }
+
+      const nextSettings: LlmSettings = {
+        ...llmSettings,
+        modelDir: dir || llmSettings.modelDir,
+        assetName: file
+      };
+      const saved = await invoke<LlmSettings>("llm_save_settings", {
+        settings: nextSettings
+      });
+      setLlmSettings(saved);
+      setLlmProjectPreset((prev) => ({ ...prev, assetName: file }));
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
   const handleResolveLlmModel = async () => {
     if (!selectedProject) return;
     try {
@@ -1982,6 +2024,14 @@ export default function App() {
                           setLlmProjectPreset((prev) => ({ ...prev, assetName: e.target.value }))
                         }
                       />
+                      <div className="inline-actions">
+                        <button onClick={handlePickLocalModelFile}>Choose Local Model File (.gguf)</button>
+                      </div>
+                      {llmSettings && (
+                        <p className="muted">
+                          Local model target: {llmSettings.modelDir}/{llmProjectPreset.assetName}
+                        </p>
+                      )}
                       <label className="checkbox">
                         <input
                           type="checkbox"
